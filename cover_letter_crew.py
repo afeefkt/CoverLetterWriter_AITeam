@@ -805,7 +805,8 @@ MANDATORY STRUCTURE — write EXACTLY 4 paragraphs, no bullet points:
 
 PARAGRAPH 1 — Opening (3 sentences minimum):
 First line: "Dear Hiring Manager," (alone on its own line)
-Use the ATS_OPENING or OPENING_HOOK from context. State the position you are applying for.
+Second sentence MUST be exactly: "I am writing to apply for the {job['job_title']} position at {job['company']}."
+Then use the ATS_OPENING or OPENING_HOOK from context as the next sentence.
 Establish the single strongest qualification that makes you right for this specific role.
 
 PARAGRAPH 2 — Specific Evidence (4 sentences minimum):
@@ -866,8 +867,9 @@ MANDATORY STRUCTURE — write EXACTLY 4 paragraphs, no bullet points, punchy dir
 
 PARAGRAPH 1 — Hook (3 sentences minimum):
 First line: "Dear Hiring Manager," (alone on its own line)
-Immediately follow with the ATS_OPENING — the strongest possible hook, no throat-clearing.
-State the role and your most relevant qualification in one confident sentence.
+Second sentence MUST be exactly: "I am applying for the {job['job_title']} role at {job['company']}."
+Then use the ATS_OPENING — the strongest possible hook, no throat-clearing.
+State your most relevant qualification in one confident sentence.
 
 PARAGRAPH 2 — Proof (4 sentences minimum):
 Name the specific roles and companies where you built the relevant experience.
@@ -1058,16 +1060,19 @@ EN_MODERN_FINAL:
 #  SAVE TO WORD (.docx)
 # ─────────────────────────────────────────────
 
-def save_to_docx(job: dict, results: list, output_dir: Path,
-                 candidate_name: str = "", candidate_address: str = "",
-                 candidate_email: str = "", candidate_phone: str = "") -> Path:
-    """Save both English cover letter variants into a single Word document."""
+def _safe_part(s: str, max_len: int = 28) -> str:
+    import re as _re
+    words = _re.sub(r'[^\w\s]', '', s.strip()).split()
+    return (''.join(w.capitalize() for w in words)[:max_len] or 'Unknown')
 
-    output_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    company_safe = job['company'].replace(" ", "_").replace("/", "-")
-    filename = output_dir / f"CoverLetter_{company_safe}_{timestamp}.docx"
 
+def _build_docx_doc(job: dict, variants: list,
+                    candidate_name: str = "", candidate_address: str = "",
+                    candidate_email: str = "", candidate_phone: str = "") -> "Document":
+    """
+    Core builder. `variants` is a list of (label, letter_text) tuples,
+    e.g. [("English - Formal", "..."), ("German - Formal", "...")].
+    """
     doc = Document()
 
     for section in doc.sections:
@@ -1079,11 +1084,6 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
     style = doc.styles['Normal']
     style.font.name = 'Arial'
     style.font.size = Pt(11)
-
-    variant_labels = [
-        ("English - Formal", "EN_FORMAL"),
-        ("English - Modern", "EN_MODERN"),
-    ]
 
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1101,7 +1101,7 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
         f"Location  : {job['location']}",
         f"Generated : {datetime.now().strftime('%d %B %Y, %H:%M')}",
     ]
-    if job['ref_number']:
+    if job.get('ref_number'):
         info_lines.append(f"Reference : {job['ref_number']}")
 
     for line in info_lines:
@@ -1110,14 +1110,17 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
 
     doc.add_paragraph()
 
+    variant_word = "variant" if len(variants) == 1 else "variants"
     note = doc.add_paragraph(
-        "This package contains 2 English cover letter variants. "
-        "Choose the one that fits your mood and the company culture."
+        f"This package contains {len(variants)} cover letter {variant_word}. "
+        "Choose the one that best fits the company culture and language requirement."
     )
     note.runs[0].italic = True
     note.runs[0].font.size = Pt(10)
 
-    for i, (label, key) in enumerate(variant_labels):
+    today = datetime.now().strftime("%d %B %Y")
+
+    for i, (label, letter_text) in enumerate(variants):
         doc.add_page_break()
 
         header = doc.add_paragraph()
@@ -1130,7 +1133,6 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
         div = doc.add_paragraph()
         div.paragraph_format.space_after = Pt(12)
 
-        today = datetime.now().strftime("%d %B %Y")
         header_block = []
         if candidate_name:
             header_block.append(candidate_name)
@@ -1140,8 +1142,8 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
             header_block.append(candidate_address)
         if candidate_email:
             header_block.append(candidate_email)
-        header_block += ["", today, "", job['company'], job['location']]
-        if job['ref_number']:
+        header_block += ["", today, "", job['company'], job.get('location', '')]
+        if job.get('ref_number'):
             header_block.append(f"Re: {job['job_title']} — Ref: {job['ref_number']}")
         else:
             header_block.append(f"Re: {job['job_title']}")
@@ -1153,8 +1155,8 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
 
         doc.add_paragraph()
 
-        letter_text = str(results[i]) if results[i] else "[Letter generation failed]"
-        for para in letter_text.strip().split("\n"):
+        body = str(letter_text).strip() if letter_text else "[Letter generation failed]"
+        for para in body.split("\n"):
             para = para.strip()
             if para:
                 p = doc.add_paragraph(para)
@@ -1163,8 +1165,123 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
 
         doc.add_paragraph()
 
+    return doc
+
+
+def save_to_docx(job: dict, variants, output_dir: Path,
+                 candidate_name: str = "", candidate_address: str = "",
+                 candidate_email: str = "", candidate_phone: str = "") -> Path:
+    """
+    Save cover letter variants to disk.
+    `variants` accepts:
+      - list of (label, text) tuples  — new style
+      - list of plain strings          — legacy: treated as (EN Formal, EN Modern)
+    Filename: CandidateName_JobTitle_CompanyName_YYYYMMDD.docx
+    """
+    # Normalise legacy call (list of strings)
+    if variants and isinstance(variants[0], str):
+        _labels = ["English - Formal", "English - Modern", "English - Variant 3"]
+        variants = [((_labels[i] if i < len(_labels) else f"Variant {i+1}"), t)
+                    for i, t in enumerate(variants)]
+
+    output_dir.mkdir(exist_ok=True)
+    date_str     = datetime.now().strftime("%d%m%Y")
+    name_part    = _safe_part(candidate_name or "Candidate")
+    title_part   = _safe_part(job.get('job_title', 'Position'))
+    company_part = _safe_part(job.get('company', 'Company'))
+    filename     = output_dir / f"CoverLetter_{name_part}_{title_part}_{company_part}_{date_str}.docx"
+
+    doc = _build_docx_doc(job, variants,
+                          candidate_name=candidate_name,
+                          candidate_address=candidate_address,
+                          candidate_email=candidate_email,
+                          candidate_phone=candidate_phone)
     doc.save(str(filename))
     return filename
+
+
+def build_docx_bytes(job: dict, variants: list,
+                     candidate_name: str = "", candidate_address: str = "",
+                     candidate_email: str = "", candidate_phone: str = "") -> bytes:
+    """
+    Build a docx and return raw bytes (for Streamlit download_button).
+    `variants` is a list of (label, letter_text) tuples.
+    """
+    import io
+    doc = _build_docx_doc(job, variants,
+                          candidate_name=candidate_name,
+                          candidate_address=candidate_address,
+                          candidate_email=candidate_email,
+                          candidate_phone=candidate_phone)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────
+#  TRANSLATION
+# ─────────────────────────────────────────────
+
+_LANG_REGISTER = {
+    "German": (
+        "Use formal 'Sie' throughout. Sign off with 'Mit freundlichen Grüßen'.\n"
+        "SALUTATION: Always use 'Sehr geehrte Damen und Herren,' — never use "
+        "'Sehr geehrte/r Personalverantwortliche/r' or any gendered slash form.\n"
+        "TONE: German engineering applications are factual and modest — NOT American-style "
+        "self-marketing. Reduce sales language by ~15–20%.\n"
+        "  - AVOID: 'qualifiziert mich als starken Kandidaten'\n"
+        "  - PREFER: 'bringe ich Erfahrungen mit, die gut zu den Anforderungen der Position passen'\n"
+        "  - AVOID: 'ich bin überzeugt, der ideale Kandidat zu sein'\n"
+        "  - PREFER: 'ich sehe gute Übereinstimmungen zwischen meinem Profil und den Anforderungen'\n"
+        "TERMINOLOGY — use natural German engineering vocabulary:\n"
+        "  - 'Embedded-Softwareentwicklung' (NOT 'Entwicklung eingebetteter Software')\n"
+        "  - 'Integration von produktionsreifem Code' or 'Seriencode-Integration' "
+        "(NOT 'Produktionscode-Integration')\n"
+        "  - 'Analyse des Systemverhaltens' (NOT 'Verhaltensanalyse' in isolation)\n"
+        "  - Prefer established German compound nouns over literal word-for-word translations.\n"
+        "SENTENCE LENGTH: Keep sentences short and structured. German professional writing "
+        "does NOT use long compressed 'mega-sentences'. Break dense sentences into two.\n"
+        "HONEST FRAMING: Phrases like 'ein Bereich, in den ich mich gerade einarbeite' are "
+        "excellent — German recruiters value honesty. Keep these when present in the source."
+    ),
+    "French":     "Use formal 'vous' (vouvoiement). Sign off with 'Veuillez agréer mes sincères salutations'.",
+    "Spanish":    "Use formal 'usted'. Sign off with 'Atentamente'.",
+    "Italian":    "Use formal 'Lei'. Sign off with 'Distinti saluti'.",
+    "Dutch":      "Use formal 'u'. Sign off with 'Met vriendelijke groet'.",
+    "Portuguese": "Use formal 'você'. Sign off with 'Atenciosamente'.",
+    "Polish":     "Use formal address. Sign off with 'Z poważaniem'.",
+    "Swedish":    "Use formal address. Sign off with 'Med vänliga hälsningar'.",
+}
+
+_PRESERVED_TERMS = (
+    "DO-178C, AUTOSAR, VxWorks, ASIL, MISRA C, MIL/SIL/HIL, CANoe, WinIdea, "
+    "Simulink, DOORS, FOC, IPMSM, MXAM, Polyspace, TESSY, A-SPICE"
+)
+
+
+def translate_letter(text: str, target_lang: str,
+                     llm_config: dict | None = None) -> str:
+    """
+    Translate a cover letter to target_lang using the configured LLM.
+    Preserves proper nouns, technical standards, and company/job names.
+    """
+    llm = get_llm(llm_config)
+    register = _LANG_REGISTER.get(target_lang, "Use formal register throughout.")
+    prompt = (
+        f"Translate this professional cover letter into {target_lang}.\n\n"
+        f"Language and style rules:\n"
+        f"{register}\n\n"
+        f"General rules (apply to all languages):\n"
+        f"- Preserve ALL of the following exactly as written (do NOT translate): "
+        f"company names, candidate name, job titles, "
+        f"technical terms and standards ({_PRESERVED_TERMS}).\n"
+        f"- Keep the same paragraph structure.\n"
+        f"- Do NOT add, remove, or paraphrase content — only translate.\n"
+        f"- Output ONLY the translated letter text, nothing else.\n\n"
+        f"LETTER TO TRANSLATE:\n{text}"
+    )
+    result = llm.call([{"role": "user", "content": prompt}])
+    return result.strip() if isinstance(result, str) else str(result).strip()
 
 
 # ─────────────────────────────────────────────
@@ -1277,7 +1394,11 @@ def generate_cover_letters(
     docx_path = None
     if save_docx:
         _dir = output_dir or (Path(__file__).parent / "output")
-        docx_path = save_to_docx(job, letters, _dir,
+        _variants = [
+            ("English - Formal", letters[0]),
+            ("English - Modern", letters[1]),
+        ]
+        docx_path = save_to_docx(job, _variants, _dir,
                                   candidate_name=_cname,
                                   candidate_address=candidate_address,
                                   candidate_email=candidate_email,

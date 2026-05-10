@@ -1,8 +1,23 @@
 # Cover Letter Crew
 
-A **CrewAI-powered** app that turns a raw job posting + your CV into **2 polished English cover letters** (formal and modern) with systematic fact-checking to eliminate hallucinations — in about 2 minutes.
+*A sample project by [Afeef KALLANTHODAN](https://github.com/AfeefKallanthodan)*
 
-Runs entirely on a **free local 7B model** (Ollama) or a **cheap cloud API** (DeepSeek, ~$0.002 per run).
+---
+
+This project started as a **vibe-coding experiment** — my way of learning how agentic AI actually works in practice, not just in theory.
+
+The idea was simple: can I build something genuinely useful using multiple AI agents collaborating on a real task, without it turning into a hallucination machine? Turns out — yes, if you think carefully about how agents hand off context to each other.
+
+Two scenarios drove the design:
+
+- 🔒 **Local AI (privacy-first)** — runs entirely on your laptop using [Ollama](https://ollama.com). No data leaves your machine. Completely free. Good enough for most use cases.
+- ☁️ **Cloud APIs (maximum quality)** — swap to DeepSeek, Claude, GPT-4o, Gemini, or Groq at runtime for noticeably better output. Optional.
+
+Built with **[CrewAI](https://crewai.com)** — a Python framework for orchestrating multi-agent AI pipelines. Each agent has one narrow job; they pass structured context to each other rather than trying to do everything in one giant prompt.
+
+> **This is a learning project.** It works well enough to produce real, usable cover letters — but expect rough edges, and always review the output before sending anything. Feedback and pull requests welcome.
+
+What it does in practice: paste a job posting + upload your CV → 7 AI agents collaborate across 8 tasks → 2 polished, fact-checked cover letters in ~2 minutes, with an optional German (or multi-language) translation step.
 
 ---
 
@@ -53,9 +68,11 @@ Open `http://localhost:8501` in your browser.
 | Raw job paste | Paste the full LinkedIn page — UI noise is stripped by an agent |
 | 2 letter variants | EN Formal · EN Modern |
 | Fact Checker | Dedicated agent detects hallucinations before the reviewer applies fixes |
+| Match score | Circular gauge showing job ↔ profile fit % before you commit to applying |
 | Copy-ready output | Each letter in a code block — select all, Ctrl+C, done |
-| Word export | Optional `.docx` download with both variants formatted |
-| LLM flexibility | Ollama (local/free) or any cloud API; switch in sidebar at runtime |
+| Translation | One-click AI translation to German, French, Spanish, Italian + more (formal register aware) |
+| Word export | Checkbox-select which variants to include; filename: `CoverLetter_Name_Title_Company_Date.docx` |
+| LLM flexibility | Ollama (local/free) or any cloud API (7 providers); switch at runtime, no code changes |
 | CLI mode | `python cover_letter_crew.py` still works unchanged |
 
 ---
@@ -245,6 +262,8 @@ The Fact Checker has one narrow job (structured output, no creativity required) 
 
 The Streamlit sidebar lets you switch provider, pick a model, enter your API key, and tune temperature and max tokens — all at runtime without touching any code.
 
+> **Note on Claude:** The Anthropic API (`ANTHROPIC_API_KEY`) is a **separate product** from a Claude.ai or Claude Code subscription. Having a Claude Code subscription does not give you API access — you need a key from [console.anthropic.com](https://console.anthropic.com). For cheapest Claude quality, use `claude-haiku-4-5` (~$0.01/run).
+
 **Recommended local models:**
 
 | Model | VRAM | Notes |
@@ -253,6 +272,36 @@ The Streamlit sidebar lets you switch provider, pick a model, enter your API key
 | `mistral:7b` | ~5 GB | Good English writing quality |
 | `llama3.2:3b` | ~3 GB | Fastest, lower quality |
 | `qwen2.5:14b` | ~10 GB | Better reasoning, fewer hallucinations |
+
+---
+
+## Minimum Hardware for Local AI (Ollama)
+
+Running a 7B model locally is more accessible than people expect — no GPU required.
+
+### Minimum (CPU-only, 7B model)
+
+| Component | Minimum | Notes |
+|---|---|---|
+| RAM | **16 GB** | 8 GB technically works but generation is very slow and may crash |
+| CPU | Intel i5 (10th gen+) / AMD Ryzen 5 (5000+) | Any modern quad-core |
+| Storage | **10 GB free** | Model files are 4–8 GB each |
+| GPU | Not required | CPU-only works fine |
+| OS | Windows 10/11, macOS 12+, Ubuntu 20.04+ | |
+
+Expect **1–3 tokens/sec** on CPU-only. A full 8-agent pipeline takes 5–10 minutes.
+
+### Recommended (GPU-accelerated)
+
+| Component | Recommended |
+|---|---|
+| RAM | 32 GB |
+| GPU | NVIDIA RTX 3060 (8 GB VRAM) or better |
+| Storage | 50 GB free (room for multiple models) |
+
+GPU gives **10–30 tokens/sec** — pipeline runs in under 2 minutes, same as a cloud API.
+
+**Apple Silicon (M1/M2/M3/M4):** Ollama uses Metal acceleration natively. An M2 MacBook Pro with 16 GB unified memory runs 7B models at ~20–30 tokens/sec — excellent local performance with no GPU required.
 
 ---
 
@@ -372,3 +421,19 @@ If output quality is inconsistent:
 | DeepSeek V3 | ~$0.001–0.003 |
 | Claude Haiku 4.5 | ~$0.01–0.02 |
 | Claude Sonnet 4.6 | ~$0.05–0.10 |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Free to use, modify, and share. If you build something useful on top of this, a mention is appreciated but not required.
+
+---
+
+## About
+
+Built by **Afeef KALLANTHODAN** as a hands-on experiment in agentic AI.
+
+Stack: Python · [CrewAI](https://crewai.com) · [Streamlit](https://streamlit.io) · [LiteLLM](https://litellm.ai) · [Ollama](https://ollama.com)
