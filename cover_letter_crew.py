@@ -1271,33 +1271,79 @@ def build_docx_bytes(job: dict, variants: list,
 
 _LANG_REGISTER = {
     "German": (
-        "Use formal 'Sie' throughout. Sign off with 'Mit freundlichen Grüßen'.\n"
-        "SALUTATION: Always use 'Sehr geehrte Damen und Herren,' — never use "
-        "'Sehr geehrte/r Personalverantwortliche/r' or any gendered slash form.\n"
-        "TONE: German engineering applications are factual and modest — NOT American-style "
-        "self-marketing. Reduce sales language by ~15–20%.\n"
-        "  - AVOID: 'qualifiziert mich als starken Kandidaten'\n"
-        "  - PREFER: 'bringe ich Erfahrungen mit, die gut zu den Anforderungen der Position passen'\n"
-        "  - AVOID: 'ich bin überzeugt, der ideale Kandidat zu sein'\n"
-        "  - PREFER: 'ich sehe gute Übereinstimmungen zwischen meinem Profil und den Anforderungen'\n"
-        "TERMINOLOGY — use natural German engineering vocabulary:\n"
+        "You are a native German business writer with 15 years of experience "
+        "writing Bewerbungsschreiben for engineering roles in Germany.\n\n"
+        "SALUTATION: Always 'Sehr geehrte Damen und Herren,' — never any gendered slash form.\n"
+        "SIGN-OFF: 'Mit freundlichen Grüßen' only. No bilingual sign-offs.\n\n"
+        "CLOSING PARAGRAPH — strict rule:\n"
+        "  - Write EXACTLY ONE closing call-to-action sentence. Not two, not three.\n"
+        "  - Pick one idea: either availability for interview OR looking forward to reply — never both.\n"
+        "  - WRONG: 'Ich freue mich...Ich stehe gerne zur Verfügung...Bitte kontaktieren Sie mich...'\n"
+        "  - RIGHT:  'Über eine Einladung zu einem persönlichen Gespräch würde ich mich sehr freuen.'\n\n"
+        "TONE: Factual, modest, structured — NOT American self-marketing.\n"
+        "  - AVOID: 'qualifiziert mich als starken Kandidaten' → "
+        "PREFER: 'deckt sich gut mit den Anforderungen dieser Position'\n"
+        "  - AVOID: repeating the same qualification idea twice in one paragraph.\n\n"
+        "SENTENCE STRUCTURE — avoid translation artifacts:\n"
+        "  - Do NOT start two consecutive paragraphs with the same word (e.g. 'Meine Arbeit...' twice).\n"
+        "  - Break long English-style clauses into shorter German sentences.\n"
+        "  - Restructure phrases that sound like translated English into natural German word order.\n"
+        "  - EXAMPLE of translation artifact to fix:\n"
+        "      English: 'establishes my qualification for this position'\n"
+        "      Bad German: 'belegen meine Eignung für diese Position' (if already used once)\n"
+        "      Fix: omit the repetition entirely or rephrase as 'passt zu den Anforderungen'\n\n"
+        "TERMINOLOGY — use native German engineering vocabulary:\n"
         "  - 'Embedded-Softwareentwicklung' (NOT 'Entwicklung eingebetteter Software')\n"
-        "  - 'Integration von produktionsreifem Code' or 'Seriencode-Integration' "
-        "(NOT 'Produktionscode-Integration')\n"
-        "  - 'Analyse des Systemverhaltens' (NOT 'Verhaltensanalyse' in isolation)\n"
-        "  - Prefer established German compound nouns over literal word-for-word translations.\n"
-        "SENTENCE LENGTH: Keep sentences short and structured. German professional writing "
-        "does NOT use long compressed 'mega-sentences'. Break dense sentences into two.\n"
-        "HONEST FRAMING: Phrases like 'ein Bereich, in den ich mich gerade einarbeite' are "
-        "excellent — German recruiters value honesty. Keep these when present in the source."
+        "  - 'Seriencode-Integration' (NOT 'Produktionscode-Integration')\n"
+        "  - 'Analyse des Systemverhaltens' (NOT 'Verhaltensanalyse' alone)\n"
+        "  - Use established German compound nouns — never literal word-for-word constructions.\n\n"
+        "HONEST FRAMING: Keep phrases like 'ein Bereich, in den ich mich gerade einarbeite' — "
+        "German recruiters value this honesty."
     ),
-    "French":     "Use formal 'vous' (vouvoiement). Sign off with 'Veuillez agréer mes sincères salutations'.",
-    "Spanish":    "Use formal 'usted'. Sign off with 'Atentamente'.",
-    "Italian":    "Use formal 'Lei'. Sign off with 'Distinti saluti'.",
-    "Dutch":      "Use formal 'u'. Sign off with 'Met vriendelijke groet'.",
-    "Portuguese": "Use formal 'você'. Sign off with 'Atenciosamente'.",
-    "Polish":     "Use formal address. Sign off with 'Z poważaniem'.",
-    "Swedish":    "Use formal address. Sign off with 'Med vänliga hälsningar'.",
+    "French": (
+        "You are a native French business writer for professional job applications.\n"
+        "Use formal 'vous' (vouvoiement) throughout.\n"
+        "Sign off with 'Veuillez agréer, Madame, Monsieur, l'expression de mes salutations distinguées.'\n"
+        "CLOSING: One closing sentence only — no repetition of the call-to-action.\n"
+        "STYLE: Avoid literal English sentence structures. Rephrase into natural French flow. "
+        "French professional letters are formal but not verbose — avoid filler phrases."
+    ),
+    "Spanish": (
+        "You are a native Spanish business writer for professional job applications.\n"
+        "Use formal 'usted' throughout. Sign off with 'Atentamente,'.\n"
+        "CLOSING: One closing call-to-action only.\n"
+        "STYLE: Avoid literal English constructions. Use natural Spanish business phrasing."
+    ),
+    "Italian": (
+        "You are a native Italian business writer for professional job applications.\n"
+        "Use formal 'Lei' throughout. Sign off with 'Distinti saluti,'.\n"
+        "CLOSING: One closing sentence only.\n"
+        "STYLE: Avoid literal English constructions. Use natural Italian business phrasing."
+    ),
+    "Dutch": (
+        "You are a native Dutch business writer for professional job applications.\n"
+        "Use formal 'u' throughout. Sign off with 'Met vriendelijke groet,'.\n"
+        "CLOSING: One closing sentence only.\n"
+        "STYLE: Avoid literal English constructions. Use natural Dutch business phrasing."
+    ),
+    "Portuguese": (
+        "You are a native Portuguese business writer for professional job applications.\n"
+        "Use formal register throughout. Sign off with 'Atenciosamente,'.\n"
+        "CLOSING: One closing sentence only.\n"
+        "STYLE: Avoid literal English constructions. Use natural Portuguese business phrasing."
+    ),
+    "Polish": (
+        "You are a native Polish business writer for professional job applications.\n"
+        "Use formal address throughout. Sign off with 'Z poważaniem,'.\n"
+        "CLOSING: One closing sentence only.\n"
+        "STYLE: Avoid literal English constructions. Use natural Polish business phrasing."
+    ),
+    "Swedish": (
+        "You are a native Swedish business writer for professional job applications.\n"
+        "Use formal address throughout. Sign off with 'Med vänliga hälsningar,'.\n"
+        "CLOSING: One closing sentence only.\n"
+        "STYLE: Avoid literal English constructions. Use natural Swedish business phrasing."
+    ),
 }
 
 _PRESERVED_TERMS = (
@@ -1315,17 +1361,24 @@ def translate_letter(text: str, target_lang: str,
     llm = get_llm(llm_config)
     register = _LANG_REGISTER.get(target_lang, "Use formal register throughout.")
     prompt = (
-        f"Translate this professional cover letter into {target_lang}.\n\n"
-        f"Language and style rules:\n"
+        f"You are a native {target_lang} professional writer. "
+        f"Your task is to rewrite the cover letter below so that it reads exactly as a "
+        f"native {target_lang} speaker would write it from scratch — NOT as a translation.\n\n"
+        f"This means:\n"
+        f"- Restructure sentences where needed so they sound natural in {target_lang}.\n"
+        f"- Replace English-style phrasing with the idiomatic {target_lang} equivalent.\n"
+        f"- Never carry over English word order, clause structure, or repeated phrases.\n"
+        f"- If the source letter repeats an idea (e.g. two closing calls-to-action), keep only one.\n\n"
+        f"Writer persona and style rules:\n"
         f"{register}\n\n"
-        f"General rules (apply to all languages):\n"
-        f"- Preserve ALL of the following exactly as written (do NOT translate): "
+        f"Content rules (non-negotiable):\n"
+        f"- Preserve ALL of the following exactly as written (do NOT translate or alter): "
         f"company names, candidate name, job titles, "
         f"technical terms and standards ({_PRESERVED_TERMS}).\n"
-        f"- Keep the same paragraph structure.\n"
-        f"- Do NOT add, remove, or paraphrase content — only translate.\n"
-        f"- Output ONLY the translated letter text, nothing else.\n\n"
-        f"LETTER TO TRANSLATE:\n{text}"
+        f"- Keep all factual content and the same paragraph structure.\n"
+        f"- Do NOT add or remove any information.\n"
+        f"- Output ONLY the rewritten letter text, nothing else.\n\n"
+        f"LETTER TO REWRITE:\n{text}"
     )
     result = llm.call([{"role": "user", "content": prompt}])
     return result.strip() if isinstance(result, str) else str(result).strip()
