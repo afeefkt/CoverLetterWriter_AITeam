@@ -52,6 +52,7 @@ _DEFAULTS = {
     "trans_formal":      None,
     "trans_modern":      None,
     "trans_lang":        None,
+    "match_result":      None,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -274,7 +275,7 @@ def _run_crew(profile_text: str, job_raw: str, llm_config: dict,
                 job_raw=job_raw,
                 llm_config=llm_config,
                 step_callback=step_cb,
-                save_docx=True,
+                save_docx=False,
                 output_dir=_HERE / "output",
                 company_override=company_override,
                 candidate_name=candidate_name,
@@ -664,6 +665,66 @@ elif _regex_company and employer_input.strip() == _regex_company:
 
 company_override = employer_input.strip() or None
 
+# ── CHECK MATCH ───────────────────────────────
+
+st.markdown("---")
+_cm_col, _ = st.columns([1, 3])
+with _cm_col:
+    check_match_clicked = st.button(
+        "🎯 Check Match",
+        help="Quick analysis — how well does your profile match this job? "
+             "Runs in ~20 seconds without generating letters.",
+        use_container_width=True,
+        disabled=st.session_state.is_running,
+    )
+
+if check_match_clicked:
+    if not st.session_state.profile_text.strip():
+        st.warning("Upload or paste your profile first.")
+    elif not job_raw.strip():
+        st.warning("Paste a job posting first.")
+    else:
+        from cover_letter_crew import quick_match_check
+        with st.spinner("Analysing match…"):
+            st.session_state.match_result = quick_match_check(
+                st.session_state.profile_text, job_raw, llm_config,
+                company_override=company_override or None,
+            )
+            # Pre-fill employer field if Detect hadn't been used yet
+            _pj = st.session_state.match_result.get("job", {})
+            if _pj.get("company") and not employer_input.strip():
+                st.session_state["employer_name_widget"] = _pj["company"]
+        st.rerun()
+
+# ── MATCH RESULT PANEL ───────────────────────
+_mr = st.session_state.match_result
+if _mr:
+    _pj = _mr.get("job", {})
+
+    # Job info metrics row
+    _jc1, _jc2, _jc3, _jc4 = st.columns(4)
+    _jc1.metric("Company",  _pj.get("company")  or "—")
+    _jc2.metric("Position", _pj.get("job_title")  or "—")
+    _jc3.metric("Location", _pj.get("location")   or "—")
+    _jc4.metric("Ref",      _pj.get("ref_number") or "—")
+
+    # Match circle + strengths/gaps
+    _mc_col, _ms_col, _mg_col = st.columns([1, 2, 2])
+    with _mc_col:
+        _render_match_circle(_mr["match_score"])
+    with _ms_col:
+        if _mr.get("strong"):
+            st.markdown("**✅ Strong matches**")
+            for s in _mr["strong"]:
+                st.markdown(f"- {s}")
+    with _mg_col:
+        if _mr.get("gaps"):
+            st.markdown("**⚠️ Gaps / missing**")
+            for g in _mr["gaps"]:
+                st.markdown(f"- {g}")
+
+    st.caption("This is a quick pre-check — the full pipeline runs a deeper 8-step analysis.")
+
 # ── LANGUAGE + GENERATE ──────────────────────
 
 st.markdown("---")
@@ -737,11 +798,16 @@ if st.session_state.results:
     )
 
     # ── MATCH SCORE CIRCLE ───────────────────
+    # Show the deep-pipeline score (from full crew run).
+    # Only render here if the quick pre-check panel isn't already showing it upfront.
     _match = results.get("match_score")
-    if _match is not None:
+    if _match is not None and not st.session_state.match_result:
         _l, _m, _r = st.columns([2, 1, 2])
         with _m:
             _render_match_circle(_match)
+    elif _match is not None and st.session_state.match_result:
+        # Update the upfront panel score with the deeper pipeline result
+        st.session_state.match_result["match_score"] = _match
 
     # Parsed profile summary (cached from this run or previous)
     _parsed = st.session_state.profile_parsed
@@ -765,14 +831,6 @@ if st.session_state.results:
                 st.session_state.profile_parsed    = None
                 st.session_state.profile_cache_text = ""
                 st.rerun()
-
-    # Parsed job metadata
-    with st.expander("Parsed job info", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Company",  job_meta["company"])
-        c2.metric("Position", job_meta["job_title"])
-        c3.metric("Location", job_meta["location"] or "—")
-        c4.metric("Ref",      job_meta["ref_number"] or "—")
 
     # ── ENGLISH LETTERS ──────────────────────
     tab1, tab2 = st.tabs(["EN Formal", "EN Modern"])

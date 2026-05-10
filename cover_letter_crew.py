@@ -1066,104 +1066,151 @@ def _safe_part(s: str, max_len: int = 28) -> str:
     return (''.join(w.capitalize() for w in words)[:max_len] or 'Unknown')
 
 
+def _add_horizontal_rule(doc: "Document") -> None:
+    """Add a thin grey horizontal line using paragraph bottom border."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after  = Pt(0)
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'),   'single')
+    bottom.set(qn('w:sz'),    '4')
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), 'CCCCCC')
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+
 def _build_docx_doc(job: dict, variants: list,
                     candidate_name: str = "", candidate_address: str = "",
                     candidate_email: str = "", candidate_phone: str = "") -> "Document":
     """
-    Core builder. `variants` is a list of (label, letter_text) tuples,
-    e.g. [("English - Formal", "..."), ("German - Formal", "...")].
+    Builds a send-ready business letter Word document.
+    Each variant gets its own page, formatted as a professional cover letter —
+    no cover page, no 'VARIANT' headings, ready to print and send.
+
+    `variants` is a list of (label, letter_text) tuples.
     """
     doc = Document()
 
+    # European A4-friendly margins
     for section in doc.sections:
         section.top_margin    = Inches(1.0)
         section.bottom_margin = Inches(1.0)
-        section.left_margin   = Inches(1.2)
-        section.right_margin  = Inches(1.2)
+        section.left_margin   = Inches(1.25)
+        section.right_margin  = Inches(1.0)
 
     style = doc.styles['Normal']
-    style.font.name = 'Arial'
+    style.font.name = 'Calibri'
     style.font.size = Pt(11)
-
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run("COVER LETTER PACKAGE")
-    run.bold = True
-    run.font.size = Pt(16)
-    run.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
-
-    doc.add_paragraph()
-
-    info_lines = [
-        f"Candidate : {candidate_name or 'N/A'}",
-        f"Position  : {job['job_title']}",
-        f"Company   : {job['company']}",
-        f"Location  : {job['location']}",
-        f"Generated : {datetime.now().strftime('%d %B %Y, %H:%M')}",
-    ]
-    if job.get('ref_number'):
-        info_lines.append(f"Reference : {job['ref_number']}")
-
-    for line in info_lines:
-        p = doc.add_paragraph(line)
-        p.runs[0].font.size = Pt(10)
-
-    doc.add_paragraph()
-
-    variant_word = "variant" if len(variants) == 1 else "variants"
-    note = doc.add_paragraph(
-        f"This package contains {len(variants)} cover letter {variant_word}. "
-        "Choose the one that best fits the company culture and language requirement."
-    )
-    note.runs[0].italic = True
-    note.runs[0].font.size = Pt(10)
 
     today = datetime.now().strftime("%d %B %Y")
 
     for i, (label, letter_text) in enumerate(variants):
-        doc.add_page_break()
+        if i > 0:
+            doc.add_page_break()
 
-        header = doc.add_paragraph()
-        header.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        h_run = header.add_run(f"VARIANT {i+1}   {label}")
-        h_run.bold = True
-        h_run.font.size = Pt(13)
-        h_run.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D)
+        # ── If multiple variants, add a subtle tab label at top ──────────
+        if len(variants) > 1:
+            lbl_p = doc.add_paragraph()
+            lbl_r = lbl_p.add_run(label.upper())
+            lbl_r.font.size  = Pt(8)
+            lbl_r.font.color.rgb = RGBColor(0xAA, 0xAA, 0xAA)
+            lbl_r.font.name  = 'Calibri'
+            lbl_p.paragraph_format.space_after = Pt(4)
 
-        div = doc.add_paragraph()
-        div.paragraph_format.space_after = Pt(12)
+        # ── Sender block (right-aligned) ─────────────────────────────────
+        def _rline(text: str, bold: bool = False, size: int = 10):
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            r = p.add_run(text)
+            r.bold = bold
+            r.font.size = Pt(size)
+            r.font.name = 'Calibri'
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after  = Pt(1)
 
-        header_block = []
         if candidate_name:
-            header_block.append(candidate_name)
-        if candidate_phone:
-            header_block.append(candidate_phone)
+            _rline(candidate_name, bold=True, size=12)
+        contact = "  ·  ".join(filter(None, [candidate_phone, candidate_email]))
+        if contact:
+            _rline(contact, size=9)
         if candidate_address:
-            header_block.append(candidate_address)
-        if candidate_email:
-            header_block.append(candidate_email)
-        header_block += ["", today, "", job['company'], job.get('location', '')]
-        if job.get('ref_number'):
-            header_block.append(f"Re: {job['job_title']} — Ref: {job['ref_number']}")
-        else:
-            header_block.append(f"Re: {job['job_title']}")
+            _rline(candidate_address, size=9)
 
-        for line in header_block:
-            p = doc.add_paragraph(line if line else " ")
-            p.runs[0].font.size = Pt(10) if line else Pt(6)
-            p.paragraph_format.space_after = Pt(0)
+        # ── Thin divider ─────────────────────────────────────────────────
+        _add_horizontal_rule(doc)
+        _sp = doc.add_paragraph()
+        _sp.paragraph_format.space_after = Pt(6)
+
+        # ── Date (right-aligned) ─────────────────────────────────────────
+        date_p = doc.add_paragraph()
+        date_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        date_r = date_p.add_run(today)
+        date_r.font.size = Pt(10)
+        date_r.font.name = 'Calibri'
+        date_p.paragraph_format.space_after = Pt(14)
+
+        # ── Recipient block (left-aligned) ───────────────────────────────
+        def _lline(text: str, bold: bool = False, size: int = 10):
+            p = doc.add_paragraph()
+            r = p.add_run(text)
+            r.bold = bold
+            r.font.size = Pt(size)
+            r.font.name = 'Calibri'
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after  = Pt(1)
+
+        _lline(job.get('company', ''), bold=True, size=11)
+        if job.get('location'):
+            _lline(job['location'], size=10)
+
+        # ── Subject line ─────────────────────────────────────────────────
+        subj_text = f"Re: Application — {job.get('job_title', '')}"
+        if job.get('ref_number'):
+            subj_text += f"  ·  Ref: {job['ref_number']}"
 
         doc.add_paragraph()
+        subj_p = doc.add_paragraph()
+        subj_r = subj_p.add_run(subj_text)
+        subj_r.bold = True
+        subj_r.font.size = Pt(11)
+        subj_r.font.name = 'Calibri'
+        subj_p.paragraph_format.space_after = Pt(14)
 
+        # ── Letter body ──────────────────────────────────────────────────
         body = str(letter_text).strip() if letter_text else "[Letter generation failed]"
+        first_para = True
         for para in body.split("\n"):
             para = para.strip()
-            if para:
-                p = doc.add_paragraph(para)
-                p.paragraph_format.space_after = Pt(8)
+            if not para:
+                continue
+            p = doc.add_paragraph(para)
+            p.runs[0].font.name = 'Calibri'
+            p.runs[0].font.size = Pt(11)
+            p.paragraph_format.space_after  = Pt(8)
+            p.paragraph_format.space_before = Pt(0)
+            # Salutation and sign-off lines: left-aligned, not justified
+            if first_para or para.startswith(("Kind regards", "Best regards",
+                                               "Mit freundlichen", "Veuillez",
+                                               "Atentamente", "Distinti",
+                                               "Met vriendelijke")):
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            else:
                 p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            first_para = False
 
-        doc.add_paragraph()
+        # ── Signature space ──────────────────────────────────────────────
+        sig_p = doc.add_paragraph()
+        sig_p.paragraph_format.space_before = Pt(16)
+        sig_p.paragraph_format.space_after  = Pt(0)
+        if candidate_name:
+            sig_r = sig_p.add_run(candidate_name)
+            sig_r.font.name = 'Calibri'
+            sig_r.font.size = Pt(11)
 
     return doc
 
@@ -1314,6 +1361,77 @@ def _compute_match_score(gap_raw: str) -> int:
     if total == 0:
         return 0
     return round((strong + 0.5 * partial) / total * 100)
+
+
+# ─────────────────────────────────────────────
+#  QUICK MATCH CHECK  (pre-generation, single LLM call)
+# ─────────────────────────────────────────────
+
+def quick_match_check(profile_text: str, job_raw: str,
+                      llm_config: dict | None = None,
+                      company_override: str | None = None) -> dict:
+    """
+    Fast pre-generation match analysis — single LLM call, no crew.
+    Extracts job metadata AND match assessment in one shot.
+
+    Returns:
+        match_score   : int 0–100
+        strong        : list[str]  — up to 3 strong match points
+        gaps          : list[str]  — up to 3 gap / weak areas
+        job           : dict       — {company, job_title, location, ref_number}
+    """
+    import re as _re
+
+    llm = get_llm(llm_config)
+
+    prompt = (
+        "You will receive a job posting and a candidate profile.\n"
+        "Output EXACTLY the following lines — no extra text, no markdown:\n\n"
+        "JOB_TITLE: <job title extracted from posting>\n"
+        "COMPANY: <company name extracted from posting>\n"
+        "LOCATION: <city/country or NONE>\n"
+        "REF: <reference or job number or NONE>\n"
+        "MATCH_SCORE: <integer 0-100 — how well profile matches job>\n"
+        "STRONG_1: <specific matching skill or experience — one sentence>\n"
+        "STRONG_2: <specific matching skill or experience — one sentence>\n"
+        "STRONG_3: <specific matching skill or experience — one sentence>\n"
+        "GAP_1: <specific gap or missing requirement — one sentence>\n"
+        "GAP_2: <specific gap or missing requirement — one sentence>\n"
+        "GAP_3: <specific gap or missing requirement — one sentence>\n\n"
+        f"JOB POSTING:\n{job_raw[:3500]}\n\n"
+        f"CANDIDATE PROFILE:\n{profile_text[:2500]}"
+    )
+
+    raw = llm.call([{"role": "user", "content": prompt}])
+    raw = raw if isinstance(raw, str) else str(raw)
+
+    def _pick(key: str) -> str:
+        m = _re.search(rf'(?m)^{key}:\s*(.+)$', raw)
+        v = m.group(1).strip() if m else ""
+        return "" if v.upper() in ("NONE", "N/A", "-") else v
+
+    score_str = _pick("MATCH_SCORE")
+    try:
+        score = max(0, min(100, int(_re.sub(r'[^\d]', '', score_str))))
+    except (ValueError, TypeError):
+        score = 0
+
+    strong = [s for s in [_pick("STRONG_1"), _pick("STRONG_2"), _pick("STRONG_3")] if s]
+    gaps   = [s for s in [_pick("GAP_1"),    _pick("GAP_2"),    _pick("GAP_3")]    if s]
+
+    job = {
+        "company":    company_override or _pick("COMPANY"),
+        "job_title":  _pick("JOB_TITLE"),
+        "location":   _pick("LOCATION"),
+        "ref_number": _pick("REF"),
+    }
+
+    return {
+        "match_score": score,
+        "strong":      strong,
+        "gaps":        gaps,
+        "job":         job,
+    }
 
 
 # ─────────────────────────────────────────────
