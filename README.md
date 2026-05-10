@@ -8,21 +8,40 @@ Runs entirely on a **free local 7B model** (Ollama) or a **cheap cloud API** (De
 
 ## Quick Start
 
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+### 1. Clone and set up
 
-# 2a. Free local option — pull the default model
-ollama pull qwen2.5:7b
-
-# 2b. OR cheap cloud option — add your DeepSeek key
-echo DEEPSEEK_API_KEY=your_key_here > .env
-
-# 3. Launch the web UI
-streamlit run app.py
+**Windows:**
+```bat
+git clone <repo-url>
+cd CoverLetterWriter_AITeam
+setup.bat
 ```
 
-Open `http://localhost:8501` in your browser. On Windows, double-click **Run_Streamlit.bat**.
+**Mac / Linux:**
+```bash
+git clone <repo-url>
+cd CoverLetterWriter_AITeam
+chmod +x setup.sh && ./setup.sh
+```
+
+`setup` creates a `.venv`, installs all dependencies, and copies `.env.example` → `.env`.
+
+### 2. Add your API key (optional — skip for Ollama)
+
+Open `.env` and fill in the key for your chosen provider. See `.env.example` for all options.
+
+For the free local option, pull the default model instead:
+```bash
+ollama pull qwen2.5:7b
+```
+
+### 3. Launch
+
+**Windows web UI:** double-click `Run_Streamlit.bat`  
+**Mac/Linux web UI:** `bash Run.sh`  
+**CLI:** `python cover_letter_crew.py`
+
+Open `http://localhost:8501` in your browser.
 
 ---
 

@@ -8,12 +8,16 @@ import re
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
 import streamlit as st
 
 # Ensure this file's directory is on sys.path so imports work regardless of cwd
 _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+
+# Load .env so API keys are visible to os.getenv() in the sidebar
+load_dotenv(_HERE / ".env")
 
 st.set_page_config(
     page_title="Cover Letter Crew",
@@ -162,6 +166,47 @@ def _save_profile_to_file(text: str, candidate_name: str = ""):
     profile_path.write_text(content, encoding="utf-8")
 
 
+def _render_match_circle(score: int):
+    """Render a circular SVG match-score gauge."""
+    r     = 52
+    circ  = 2 * 3.14159265 * r   # ≈ 326.7
+    arc   = circ * score / 100
+    # always green — deeper green for higher scores
+    if score >= 70:
+        color, label = "#16a34a", "Strong match"
+    elif score >= 45:
+        color, label = "#22c55e", "Good match"
+    else:
+        color, label = "#4ade80", "Partial match"
+
+    st.markdown(f"""
+<div style="display:flex;flex-direction:column;align-items:center;
+            padding:12px 0 4px;gap:4px;">
+  <svg width="140" height="140" viewBox="0 0 140 140">
+    <!-- track -->
+    <circle cx="70" cy="70" r="{r}" fill="none"
+            stroke="#e5e7eb" stroke-width="13"/>
+    <!-- filled arc -->
+    <circle cx="70" cy="70" r="{r}" fill="none"
+            stroke="{color}" stroke-width="13"
+            stroke-linecap="round"
+            stroke-dasharray="{arc:.1f} {circ:.1f}"
+            transform="rotate(-90 70 70)"/>
+    <!-- percentage number -->
+    <text x="70" y="66" text-anchor="middle"
+          font-size="28" font-weight="700" fill="{color}"
+          font-family="sans-serif">{score}%</text>
+    <!-- sub-label -->
+    <text x="70" y="88" text-anchor="middle"
+          font-size="11" fill="#9ca3af"
+          font-family="sans-serif">match</text>
+  </svg>
+  <span style="font-size:13px;font-weight:600;color:{color};">{label}</span>
+  <span style="font-size:11px;color:#9ca3af;">Job ↔ Profile fit</span>
+</div>
+""", unsafe_allow_html=True)
+
+
 def _run_crew(profile_text: str, job_raw: str, llm_config: dict,
               company_override: str | None = None,
               candidate_name: str = "", candidate_address: str = "",
@@ -287,11 +332,11 @@ _BACKENDS = {
     },
     "Gemini (Google)": {
         "id":      "gemini",
-        "cost":    "Flash ~$0.01 · Pro ~$0.05 (free tier quota is very low)",
+        "cost":    "Flash ~$0.01 · Pro ~$0.05 (new accounts: 2.5 models only)",
         "env_var": "GOOGLE_API_KEY",
-        "models":  ["gemini-2.0-flash", "gemini-2.0-flash-lite",
+        "models":  ["gemini-2.5-flash", "gemini-2.5-pro",
                     "gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-preview-05-06"],
-        "default": "gemini-2.0-flash",
+        "default": "gemini-2.5-flash",
     },
     "Groq (Fast & Free tier)": {
         "id":      "groq",
@@ -388,8 +433,8 @@ with st.sidebar:
     )
     max_tokens = st.slider(
         "Max tokens per agent",
-        500, 4000, 2000, 100,
-        help="2000 works well for 7B local models. Increase to 2500+ for best quality on cloud models.",
+        500, 4000, 3000, 100,
+        help="3000 is a good default for cloud models. Drop to 1000–1500 for local 7B models or Groq free tier.",
     )
 
     industry = st.selectbox(
@@ -664,6 +709,13 @@ if st.session_state.results:
     st.success(
         f"Generated 2 English cover letters for **{job_meta['job_title']}** at **{job_meta['company']}**"
     )
+
+    # ── MATCH SCORE CIRCLE ───────────────────
+    _match = results.get("match_score")
+    if _match is not None:
+        _l, _m, _r = st.columns([2, 1, 2])
+        with _m:
+            _render_match_circle(_match)
 
     # Parsed profile summary (cached from this run or previous)
     _parsed = st.session_state.profile_parsed

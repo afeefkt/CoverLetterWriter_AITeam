@@ -159,7 +159,7 @@ def get_llm(llm_config: dict | None = None) -> LLM:
                       'gemini' | 'groq' | 'openrouter'
         model       : model name string (provider-specific)
         temperature : float (default 0.7)
-        max_tokens  : int   (default 2000)
+        max_tokens  : int   (default 3000)
         api_key     : str   (overrides the corresponding env var)
         base_url    : str   (overrides default URL; required for openrouter)
 
@@ -172,16 +172,16 @@ def get_llm(llm_config: dict | None = None) -> LLM:
         if api_key:
             print("Using DeepSeek API")
             return LLM(model="deepseek/deepseek-chat", api_key=api_key,
-                       temperature=0.7, max_tokens=2000)
+                       temperature=0.7, max_tokens=3000)
         print("No API key — using local Ollama (qwen2.5:7b)")
         _ensure_ollama()
         return LLM(model=f"ollama/{OLLAMA_MODEL}", base_url=OLLAMA_BASE_URL,
-                   temperature=0.7, max_tokens=2000)
+                   temperature=0.7, max_tokens=3000)
 
     backend     = llm_config.get("backend", "ollama")
     model       = llm_config.get("model", OLLAMA_MODEL)
     temperature = float(llm_config.get("temperature", 0.7))
-    max_tokens  = int(llm_config.get("max_tokens", 2000))
+    max_tokens  = int(llm_config.get("max_tokens", 3000))
     api_key     = llm_config.get("api_key") or ""
     base_url    = llm_config.get("base_url") or ""
 
@@ -217,7 +217,11 @@ def get_llm(llm_config: dict | None = None) -> LLM:
 
     elif backend == "gemini":
         key = _require_key("GOOGLE_API_KEY")
-        return LLM(model=f"gemini/{model}", api_key=key,
+        # Use Google's OpenAI-compatible endpoint instead of the native google-genai
+        # provider — the native provider is locked to v1beta and has very limited
+        # model availability. The OpenAI-compatible endpoint supports the full range.
+        return LLM(model=f"openai/{model}", api_key=key,
+                   base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                    temperature=temperature, max_tokens=max_tokens)
 
     elif backend == "groq":
@@ -1164,6 +1168,38 @@ def save_to_docx(job: dict, results: list, output_dir: Path,
 
 
 # ─────────────────────────────────────────────
+#  MATCH SCORE
+# ─────────────────────────────────────────────
+
+def _compute_match_score(gap_raw: str) -> int:
+    """
+    Derive a 0–100 match score from the Skill Gap Mapper output (task 2).
+    Formula: (strong + 0.5 * partial) / (strong + partial + gaps) * 100
+    """
+    import re as _re
+
+    def _count(header: str) -> int:
+        m = _re.search(
+            rf'(?m)^{header}:\s*\n(.*?)(?=\n[A-Z_]{{3,}}:|$)',
+            gap_raw, _re.S
+        )
+        if not m:
+            return 0
+        return sum(
+            1 for ln in m.group(1).splitlines()
+            if ln.strip() and not ln.strip().startswith('#')
+        )
+
+    strong  = _count("STRONG_MATCHES")
+    partial = _count("PARTIAL_MATCHES")
+    gaps    = _count("PROHIBITED_CLAIMS")
+    total   = strong + partial + gaps
+    if total == 0:
+        return 0
+    return round((strong + 0.5 * partial) / total * 100)
+
+
+# ─────────────────────────────────────────────
 #  PUBLIC API (for Streamlit and other callers)
 # ─────────────────────────────────────────────
 
@@ -1235,6 +1271,9 @@ def generate_cover_letters(
         _pick(reviewed.get("en_modern", ""), outputs[5].raw if len(outputs) > 5 else ""),
     ]
 
+    gap_raw     = outputs[2].raw if len(outputs) > 2 else ""
+    match_score = _compute_match_score(gap_raw) if gap_raw else None
+
     docx_path = None
     if save_docx:
         _dir = output_dir or (Path(__file__).parent / "output")
@@ -1250,6 +1289,7 @@ def generate_cover_letters(
         "job":            job,
         "docx_path":      docx_path,
         "profile_parsed": structured_profile,
+        "match_score":    match_score,
     }
 
 
