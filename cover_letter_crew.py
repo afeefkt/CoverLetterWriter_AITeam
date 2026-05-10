@@ -1223,7 +1223,27 @@ def build_docx_bytes(job: dict, variants: list,
 # ─────────────────────────────────────────────
 
 _LANG_REGISTER = {
-    "German":     "Use formal 'Sie' throughout. Sign off with 'Mit freundlichen Grüßen'.",
+    "German": (
+        "Use formal 'Sie' throughout. Sign off with 'Mit freundlichen Grüßen'.\n"
+        "SALUTATION: Always use 'Sehr geehrte Damen und Herren,' — never use "
+        "'Sehr geehrte/r Personalverantwortliche/r' or any gendered slash form.\n"
+        "TONE: German engineering applications are factual and modest — NOT American-style "
+        "self-marketing. Reduce sales language by ~15–20%.\n"
+        "  - AVOID: 'qualifiziert mich als starken Kandidaten'\n"
+        "  - PREFER: 'bringe ich Erfahrungen mit, die gut zu den Anforderungen der Position passen'\n"
+        "  - AVOID: 'ich bin überzeugt, der ideale Kandidat zu sein'\n"
+        "  - PREFER: 'ich sehe gute Übereinstimmungen zwischen meinem Profil und den Anforderungen'\n"
+        "TERMINOLOGY — use natural German engineering vocabulary:\n"
+        "  - 'Embedded-Softwareentwicklung' (NOT 'Entwicklung eingebetteter Software')\n"
+        "  - 'Integration von produktionsreifem Code' or 'Seriencode-Integration' "
+        "(NOT 'Produktionscode-Integration')\n"
+        "  - 'Analyse des Systemverhaltens' (NOT 'Verhaltensanalyse' in isolation)\n"
+        "  - Prefer established German compound nouns over literal word-for-word translations.\n"
+        "SENTENCE LENGTH: Keep sentences short and structured. German professional writing "
+        "does NOT use long compressed 'mega-sentences'. Break dense sentences into two.\n"
+        "HONEST FRAMING: Phrases like 'ein Bereich, in den ich mich gerade einarbeite' are "
+        "excellent — German recruiters value honesty. Keep these when present in the source."
+    ),
     "French":     "Use formal 'vous' (vouvoiement). Sign off with 'Veuillez agréer mes sincères salutations'.",
     "Spanish":    "Use formal 'usted'. Sign off with 'Atentamente'.",
     "Italian":    "Use formal 'Lei'. Sign off with 'Distinti saluti'.",
@@ -1249,15 +1269,16 @@ def translate_letter(text: str, target_lang: str,
     register = _LANG_REGISTER.get(target_lang, "Use formal register throughout.")
     prompt = (
         f"Translate this professional cover letter into {target_lang}.\n\n"
-        f"Rules:\n"
-        f"- {register}\n"
+        f"Language and style rules:\n"
+        f"{register}\n\n"
+        f"General rules (apply to all languages):\n"
         f"- Preserve ALL of the following exactly as written (do NOT translate): "
         f"company names, candidate name, job titles, "
         f"technical terms and standards ({_PRESERVED_TERMS}).\n"
-        f"- Keep the same paragraph structure and approximate length.\n"
+        f"- Keep the same paragraph structure.\n"
         f"- Do NOT add, remove, or paraphrase content — only translate.\n"
         f"- Output ONLY the translated letter text, nothing else.\n\n"
-        f"LETTER:\n{text}"
+        f"LETTER TO TRANSLATE:\n{text}"
     )
     result = llm.call([{"role": "user", "content": prompt}])
     return result.strip() if isinstance(result, str) else str(result).strip()
