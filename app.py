@@ -30,6 +30,11 @@ st.set_page_config(
 #  SESSION STATE DEFAULTS
 # ─────────────────────────────────────────────
 
+_LANGUAGES = [
+    "English", "German", "French", "Spanish",
+    "Italian", "Dutch", "Portuguese", "Polish", "Swedish",
+]
+
 _DEFAULTS = {
     "profile_text":      "",
     "results":           None,
@@ -44,6 +49,9 @@ _DEFAULTS = {
     "employer_name":     "",
     "profile_parsed":    None,
     "profile_cache_text": "",
+    "trans_formal":      None,
+    "trans_modern":      None,
+    "trans_lang":        None,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -282,6 +290,9 @@ def _run_crew(profile_text: str, job_raw: str, llm_config: dict,
             st.session_state.results          = results
             st.session_state.job_meta         = results["job"]
             st.session_state.run_error        = None
+            st.session_state.trans_formal     = None
+            st.session_state.trans_modern     = None
+            st.session_state.trans_lang       = None
             if results.get("profile_parsed"):
                 st.session_state.profile_parsed    = results["profile_parsed"]
                 st.session_state.profile_cache_text = profile_text
@@ -653,15 +664,30 @@ elif _regex_company and employer_input.strip() == _regex_company:
 
 company_override = employer_input.strip() or None
 
-# ── GENERATE BUTTON ──────────────────────────
+# ── LANGUAGE + GENERATE ──────────────────────
 
 st.markdown("---")
-generate_clicked = st.button(
-    "Generate Cover Letters",
-    type="primary",
-    disabled=st.session_state.is_running,
-    use_container_width=True,
-)
+_lang_col, _gen_col = st.columns([1, 2])
+with _lang_col:
+    lang_pref = st.selectbox(
+        "Output language",
+        _LANGUAGES,
+        index=0,
+        key="lang_pref_select",
+        help=(
+            "English: generate only in English.\n"
+            "Any other: generate in English, then a one-click translate step "
+            "appears in the results so you can get the translated version too."
+        ),
+    )
+with _gen_col:
+    st.markdown("<br>", unsafe_allow_html=True)
+    generate_clicked = st.button(
+        "Generate Cover Letters",
+        type="primary",
+        disabled=st.session_state.is_running,
+        use_container_width=True,
+    )
 
 if generate_clicked:
     if not st.session_state.profile_text.strip():
@@ -748,15 +774,9 @@ if st.session_state.results:
         c3.metric("Location", job_meta["location"] or "—")
         c4.metric("Ref",      job_meta["ref_number"] or "—")
 
-    # 2 tabs
+    # ── ENGLISH LETTERS ──────────────────────
     tab1, tab2 = st.tabs(["EN Formal", "EN Modern"])
-
-    tab_data = [
-        (tab1, results["en_formal"]),
-        (tab2, results["en_modern"]),
-    ]
-
-    for tab, text in tab_data:
+    for tab, text in [(tab1, results["en_formal"]), (tab2, results["en_modern"])]:
         with tab:
             if text and text.strip():
                 st.code(text.strip(), language=None, wrap_lines=True)
@@ -764,18 +784,94 @@ if st.session_state.results:
             else:
                 st.warning("This variant was not generated successfully. Try re-running.")
 
-    # DOCX download
-    docx_path = results.get("docx_path")
-    if docx_path and Path(docx_path).exists():
-        with open(docx_path, "rb") as f:
-            docx_bytes = f.read()
-        company_safe = job_meta["company"].replace(" ", "_")
+    # ── TRANSLATION ──────────────────────────
+    _default_lang_idx = max(0, _LANGUAGES.index(lang_pref) - 1) if lang_pref != "English" else 0
+    _non_en = [l for l in _LANGUAGES if l != "English"]
+
+    with st.expander(
+        "Translate to another language",
+        expanded=(lang_pref != "English"),
+    ):
+        _tcol1, _tcol2 = st.columns([2, 1])
+        with _tcol1:
+            trans_lang_sel = st.selectbox(
+                "Translate to",
+                _non_en,
+                index=_default_lang_idx,
+                key="trans_lang_select",
+            )
+        with _tcol2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Translate", key="translate_btn", use_container_width=True):
+                from cover_letter_crew import translate_letter
+                with st.spinner(f"Translating to {trans_lang_sel}…"):
+                    st.session_state.trans_formal = translate_letter(
+                        results["en_formal"], trans_lang_sel, llm_config)
+                    st.session_state.trans_modern = translate_letter(
+                        results["en_modern"], trans_lang_sel, llm_config)
+                    st.session_state.trans_lang = trans_lang_sel
+                st.rerun()
+
+        if st.session_state.trans_formal:
+            _tl = st.session_state.trans_lang
+            st.success(f"Translated to {_tl}")
+            tt1, tt2 = st.tabs([f"{_tl} - Formal", f"{_tl} - Modern"])
+            with tt1:
+                st.code(st.session_state.trans_formal, language=None, wrap_lines=True)
+                st.caption("Click inside the block, press Ctrl+A then Ctrl+C to copy all.")
+            with tt2:
+                st.code(st.session_state.trans_modern, language=None, wrap_lines=True)
+                st.caption("Click inside the block, press Ctrl+A then Ctrl+C to copy all.")
+
+    # ── DOWNLOAD ─────────────────────────────
+    st.markdown("#### Download")
+    st.caption("Select which variants to include in the Word document:")
+
+    _dl_cols = st.columns(4)
+    with _dl_cols[0]:
+        dl_en_f = st.checkbox("EN Formal",  value=True,  key="dl_en_formal")
+    with _dl_cols[1]:
+        dl_en_m = st.checkbox("EN Modern",  value=True,  key="dl_en_modern")
+    if st.session_state.trans_formal:
+        _tl = st.session_state.trans_lang
+        with _dl_cols[2]:
+            dl_tr_f = st.checkbox(f"{_tl} Formal", value=True,  key="dl_tr_formal")
+        with _dl_cols[3]:
+            dl_tr_m = st.checkbox(f"{_tl} Modern", value=False, key="dl_tr_modern")
+    else:
+        dl_tr_f = dl_tr_m = False
+
+    _sel_variants = []
+    if dl_en_f: _sel_variants.append(("English - Formal", results["en_formal"]))
+    if dl_en_m: _sel_variants.append(("English - Modern", results["en_modern"]))
+    if dl_tr_f: _sel_variants.append((f"{st.session_state.trans_lang} - Formal", st.session_state.trans_formal))
+    if dl_tr_m: _sel_variants.append((f"{st.session_state.trans_lang} - Modern", st.session_state.trans_modern))
+
+    if _sel_variants:
+        from cover_letter_crew import build_docx_bytes
+        import re as _re
+        _sfn = lambda s: (''.join(w.capitalize() for w in _re.sub(r'[^\w\s]', '', s.strip()).split())[:28] or 'Doc')
+        _fn = (
+            f"CoverLetter"
+            f"_{_sfn(st.session_state.candidate_name or 'Candidate')}"
+            f"_{_sfn(job_meta.get('job_title','Position'))}"
+            f"_{_sfn(job_meta.get('company','Company'))}"
+            f"_{__import__('datetime').date.today().strftime('%d%m%Y')}.docx"
+        )
+        _dl_bytes = build_docx_bytes(
+            job_meta, _sel_variants,
+            candidate_name=st.session_state.candidate_name,
+            candidate_address=st.session_state.candidate_address,
+            candidate_email=st.session_state.candidate_email,
+            candidate_phone=st.session_state.candidate_phone,
+        )
+        _variant_label = " + ".join(l for l, _ in _sel_variants)
         st.download_button(
-            label="Download Word Document (.docx) — both English variants",
-            data=docx_bytes,
-            file_name=f"CoverLetters_{company_safe}.docx",
+            label=f"Download .docx  —  {_variant_label}",
+            data=_dl_bytes,
+            file_name=_fn,
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True,
         )
     else:
-        st.info("Word document was not saved (output directory may be missing write access).")
+        st.caption("Select at least one variant above to enable download.")
