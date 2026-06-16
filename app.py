@@ -254,6 +254,25 @@ def _run_crew(profile_text: str, job_raw: str, llm_config: dict,
                 lines.append(f"○ &nbsp;{name} — {desc}")
         return "\n\n".join(lines)
 
+    # ── Auto-pull Ollama model before starting the crew ─────────────
+    if llm_config.get("backend") == "ollama":
+        from cover_letter_crew import _ollama_is_running, _start_ollama, _model_is_pulled, _pull_model
+        _ollama_model = llm_config.get("model", "qwen2.5:7b")
+        with st.status(f"Checking Ollama model: {_ollama_model}", expanded=False) as _pre:
+            try:
+                if not _ollama_is_running():
+                    _pre.update(label="Starting Ollama server…")
+                    _start_ollama(fatal=False)
+                if not _model_is_pulled(_ollama_model):
+                    _pre.update(label=f"Pulling {_ollama_model} — this may take a few minutes…")
+                    _pull_model(_ollama_model, fatal=False)
+                _pre.update(label=f"Model {_ollama_model} ready", state="complete")
+            except RuntimeError as _e:
+                _pre.update(label=f"Ollama error: {_e}", state="error")
+                st.session_state.run_error = str(_e)
+                st.session_state.running = False
+                return
+
     with st.status("Running 8-step crew — do not close this tab", expanded=True) as status:
         bar      = st.progress(0, text="Starting pipeline…")
         pipeline = st.empty()
@@ -316,7 +335,9 @@ _BACKENDS = {
         "id":      "ollama",
         "cost":    "Free — runs on your machine",
         "env_var": None,
-        "models":  ["qwen2.5:7b", "qwen2.5:14b", "llama3.2:3b", "llama3.1:8b",
+        "models":  ["qwen2.5:7b", "qwen2.5:14b",
+                    "qwen3:0.6b", "qwen3:1.7b", "qwen3:4b", "qwen3:8b", "qwen3:14b",
+                    "llama3.2:3b", "llama3.1:8b",
                     "mistral:7b", "gemma2:9b", "phi3:mini",
                     "deepseek-r1:7b", "deepseek-r1:8b", "deepseek-r1:14b"],
         "default": "qwen2.5:7b",
@@ -780,8 +801,8 @@ if st.session_state.run_error:
     st.error(f"Generation failed: {st.session_state.run_error}")
     with st.expander("Troubleshooting tips"):
         st.markdown("""
-- **Ollama not running**: Start Ollama (`ollama serve`) and ensure the model is pulled (`ollama pull qwen2.5:7b`)
-- **Model missing**: Run `ollama pull <model-name>` in your terminal
+- **Ollama not running**: The app will try to start Ollama automatically. If it fails, start it manually with `ollama serve`.
+- **Model missing**: The app auto-pulls the selected model before running. If the pull fails (e.g. no internet), run `ollama pull <model-name>` manually.
 - **DeepSeek API error**: Check your API key is correct in the sidebar or `.env` file
 - **Out of memory**: Try a smaller model (e.g. `llama3.2:3b`) or reduce Max tokens in the sidebar
 - **Timeout**: The model may be too slow; try DeepSeek API for faster results

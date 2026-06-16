@@ -98,7 +98,11 @@ def _model_is_pulled(model: str) -> bool:
         with urllib.request.urlopen(f"{OLLAMA_BASE_URL}/api/tags", timeout=5) as resp:
             data = _json.loads(resp.read())
         local_names = [m["name"] for m in data.get("models", [])]
-        return any(name == model or name.startswith(model.split(":")[0] + ":") for name in local_names)
+        # Exact match, or bare name (no tag) matches the `:latest` variant
+        bare = model.split(":")[0]
+        return model in local_names or (
+            ":" not in model and f"{bare}:latest" in local_names
+        )
     except Exception:
         return False
 
