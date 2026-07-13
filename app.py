@@ -70,8 +70,13 @@ def _extract_candidate_name(text: str, filename: str = "") -> str:
     Strategy 2: filename like 'Jane_Smith_CV.pdf'
     Strategy 3: first 15 lines for a standalone title-cased full name
     """
+    # Name pattern: title-cased or all-caps parts, apostrophes and hyphens allowed
+    # (e.g. "Afeef KT", "Mary O'Brien", "Jean-Luc Picard"). Parts separated by
+    # [ \t] — NOT \s — so a match never swallows the following CV line.
+    _name_pat = r"[A-ZÀ-Þ][a-zA-ZÀ-ÿ'’\-]*(?:[ \t][A-ZÀ-Þ][a-zA-ZÀ-ÿ'’\-]*){1,3}"
+
     # Strategy 1 — explicit label
-    m = re.search(r'(?i)(?:full\s+)?name\s*[:\-]\s*([A-Z][a-zA-ZÀ-ÿ]+(?:\s[A-Z][a-zA-ZÀ-ÿ]+){1,3})', text)
+    m = re.search(rf'(?i)(?:full\s+)?name\s*[:\-]\s*({_name_pat})', text)
     if m:
         return m.group(1).strip()
 
@@ -80,15 +85,48 @@ def _extract_candidate_name(text: str, filename: str = "") -> str:
         stem = re.sub(r'\.(pdf|docx?|txt)$', '', filename, flags=re.I)
         stem = re.sub(r'[_\-\.]+', ' ', stem)
         stem = re.sub(r'(?i)(cv|resume|lebenslauf|bewerbung|application|\d+)', '', stem).strip()
-        if re.match(r'^[A-Z][a-zA-ZÀ-ÿ]+(\s[A-Z][a-zA-ZÀ-ÿ]+){1,3}$', stem):
+        if re.match(rf'^{_name_pat}$', stem):
             return stem
 
     # Strategy 3 — standalone title-cased line in first 15 non-empty lines
     for line in text.strip().splitlines()[:15]:
         line = line.strip()
-        if 4 < len(line) < 50 and re.match(r'^[A-Z][a-zA-ZÀ-ÿ]+(\s[A-Z][a-zA-ZÀ-ÿ]+){1,3}$', line):
+        if 4 < len(line) < 50 and re.match(rf'^{_name_pat}$', line):
             return line
 
+    return ""
+
+
+def _extract_phone_from_text(text: str) -> str:
+    """Extract first phone number from CV text — labelled or international format."""
+    m = re.search(
+        r'(?:tel(?:efon)?|phone|mobil(?:e)?|cell|handy|fon)[\.:\s]+([+\d][\d\s\-\(\)\/\.]{6,20})',
+        text, re.IGNORECASE,
+    )
+    if m:
+        val = re.sub(r'\s+', ' ', m.group(1)).strip().rstrip('.,:;')
+        if len(re.sub(r'\D', '', val)) >= 7:
+            return val
+    # Unlabelled international: +xx (xxx) xxx-xxxx style
+    m = re.search(r'(?<!\w)(\+\d{1,3}[\s\-]?[\d\s\-\(\)\.]{7,18}\d)(?!\w)', text)
+    return re.sub(r'\s+', ' ', m.group(1)).strip() if m else ""
+
+
+def _extract_email_from_text(text: str) -> str:
+    """Extract first email address from CV text."""
+    m = re.search(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b', text)
+    return m.group(0) if m else ""
+
+
+def _extract_address_from_text(text: str) -> str:
+    """Extract postal address from CV text (labelled or ZIP+city pattern)."""
+    m = re.search(r'(?:address|adresse|anschrift)[:\s]+([^\n]{5,80})', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # ZIP + city (DE/EU: "12345 Berlin" or "Musterstr. 1, 12345 Berlin")
+    m = re.search(r'\b\d{4,6}\s+[A-ZÄÖÜ][a-zA-ZÄÖÜäöüß\s\-]{2,30}', text)
+    if m:
+        return m.group(0).strip()
     return ""
 
 
@@ -112,7 +150,7 @@ def _extract_company_regex(text: str) -> str:
 def _llm_extract_name(profile_text: str, llm_config: dict) -> str:
     """Single-shot LLM call to extract candidate name — no crew overhead."""
     try:
-        from cover_letter_crew import get_llm
+        from cover_letter_crew import get_llm, _strip_think, _no_think_suffix
         llm = get_llm(llm_config)
         result = llm.call([{
             "role": "user",
@@ -120,10 +158,12 @@ def _llm_extract_name(profile_text: str, llm_config: dict) -> str:
                 "Extract the candidate's full name from this CV. "
                 "Return ONLY the name, nothing else.\n\n"
                 f"{profile_text[:2000]}\n\nFull name:"
+                f"{_no_think_suffix(llm_config)}"
             ),
         }])
-        name = result.strip().strip('"\'').strip()
-        if re.match(r'^[A-Z][a-z]+(\s[A-Z][a-zÀ-ÿ]+){1,3}$', name):
+        name = _strip_think(result).strip('"\'').strip()
+        # Permissive: allows all-caps parts ("Afeef KT"), apostrophes, hyphens
+        if re.match(r"^[A-ZÀ-Þ][a-zA-ZÀ-ÿ'’\-]*(\s[A-ZÀ-Þ][a-zA-ZÀ-ÿ'’\-]*){1,3}$", name):
             return name
     except Exception:
         pass
@@ -133,7 +173,7 @@ def _llm_extract_name(profile_text: str, llm_config: dict) -> str:
 def _llm_extract_company(job_raw: str, llm_config: dict) -> str:
     """Single-shot LLM call to extract employer name from a job posting."""
     try:
-        from cover_letter_crew import get_llm
+        from cover_letter_crew import get_llm, _strip_think, _no_think_suffix
         llm = get_llm(llm_config)
         result = llm.call([{
             "role": "user",
@@ -142,9 +182,10 @@ def _llm_extract_company(job_raw: str, llm_config: dict) -> str:
                 "Return ONLY the company name, nothing else. "
                 "If it is anonymous, return exactly: unknown\n\n"
                 f"{job_raw[:3000]}\n\nCompany name:"
+                f"{_no_think_suffix(llm_config)}"
             ),
         }])
-        val = result.strip().strip('"\'').strip()
+        val = _strip_think(result).strip('"\'').strip()
         if val.lower() not in ('unknown', '', 'our client', 'unser kunde'):
             return val
     except Exception:
@@ -152,10 +193,20 @@ def _llm_extract_company(job_raw: str, llm_config: dict) -> str:
     return ""
 
 
+_PROFILE_DATA_FILE = _HERE / "profile_data.txt"
+
+
 def _load_default_profile():
-    """Load profile.py content on first run if text area is empty."""
+    """Load the saved profile on first run if the text area is empty.
+    Prefers profile_data.txt (plain text, git-ignored); falls back to the
+    legacy profile.py module."""
     if st.session_state.profile_text:
         return
+    if _PROFILE_DATA_FILE.exists():
+        saved = _PROFILE_DATA_FILE.read_text(encoding="utf-8").strip()
+        if saved:
+            st.session_state.profile_text = saved
+            return
     try:
         from profile import CANDIDATE_PROFILE
         if CANDIDATE_PROFILE.strip():
@@ -165,14 +216,10 @@ def _load_default_profile():
 
 
 def _save_profile_to_file(text: str, candidate_name: str = ""):
-    profile_path = _HERE / "profile.py"
-    escaped = text.replace('"""', r'\"\"\"')
-    header = f"{candidate_name} — Candidate Profile" if candidate_name else "Candidate Profile"
-    content = (
-        f'"""\n{header}\n"""\n\n'
-        f'CANDIDATE_PROFILE = """\n{escaped}\n"""\n'
-    )
-    profile_path.write_text(content, encoding="utf-8")
+    # Plain text — CV content must never be written into importable Python
+    # source (escaping bugs there can break or even inject code), and the
+    # file is git-ignored so personal data stays out of the repository.
+    _PROFILE_DATA_FILE.write_text(text, encoding="utf-8")
 
 
 def _render_match_circle(score: int):
@@ -256,21 +303,32 @@ def _run_crew(profile_text: str, job_raw: str, llm_config: dict,
 
     # ── Auto-pull Ollama model before starting the crew ─────────────
     if llm_config.get("backend") == "ollama":
-        from cover_letter_crew import _ollama_is_running, _start_ollama, _model_is_pulled, _pull_model
-        _ollama_model = llm_config.get("model", "qwen2.5:7b")
+        from cover_letter_crew import (
+            _ollama_is_running, _start_ollama, _model_is_pulled, _pull_model,
+            OLLAMA_BASE_URL, OLLAMA_MODEL,
+        )
+        _ollama_model = llm_config.get("model", OLLAMA_MODEL)
+        _ollama_url   = llm_config.get("base_url") or OLLAMA_BASE_URL
         with st.status(f"Checking Ollama model: {_ollama_model}", expanded=False) as _pre:
             try:
-                if not _ollama_is_running():
+                if not _ollama_is_running(_ollama_url):
                     _pre.update(label="Starting Ollama server…")
-                    _start_ollama(fatal=False)
-                if not _model_is_pulled(_ollama_model):
+                    _start_ollama(fatal=False, base_url=_ollama_url)
+                if not _model_is_pulled(_ollama_model, _ollama_url):
+                    from cover_letter_crew import _is_localhost
+                    if not _is_localhost(_ollama_url):
+                        raise RuntimeError(
+                            f"Model '{_ollama_model}' is not available on the remote "
+                            f"Ollama at {_ollama_url}. Pull it there first: "
+                            f"ollama pull {_ollama_model}"
+                        )
                     _pre.update(label=f"Pulling {_ollama_model} — this may take a few minutes…")
                     _pull_model(_ollama_model, fatal=False)
                 _pre.update(label=f"Model {_ollama_model} ready", state="complete")
             except RuntimeError as _e:
                 _pre.update(label=f"Ollama error: {_e}", state="error")
                 st.session_state.run_error = str(_e)
-                st.session_state.running = False
+                st.session_state.is_running = False
                 return
 
     with st.status("Running 8-step crew — do not close this tab", expanded=True) as status:
@@ -335,12 +393,14 @@ _BACKENDS = {
         "id":      "ollama",
         "cost":    "Free — runs on your machine",
         "env_var": None,
-        "models":  ["qwen2.5:7b", "qwen2.5:14b",
-                    "qwen3:0.6b", "qwen3:1.7b", "qwen3:4b", "qwen3:8b", "qwen3:14b",
+        "models":  ["qwen3.5:9b",
+                    "qwen3:8b", "qwen3:4b", "qwen3:14b",
+                    "qwen3:0.6b", "qwen3:1.7b",
+                    "qwen2.5:7b", "qwen2.5:14b",
                     "llama3.2:3b", "llama3.1:8b",
                     "mistral:7b", "gemma2:9b", "phi3:mini",
                     "deepseek-r1:7b", "deepseek-r1:8b", "deepseek-r1:14b"],
-        "default": "qwen2.5:7b",
+        "default": "qwen3.5:9b",
     },
     "DeepSeek (API)": {
         "id":      "deepseek",
@@ -472,11 +532,12 @@ with st.sidebar:
 
     industry = st.selectbox(
         "Industry context",
-        ["Generic", "Aerospace & Defence", "Automotive & Embedded",
+        ["Auto-detect (from JD)", "Generic", "Aerospace & Defence", "Automotive & Embedded",
          "Software Engineering", "Finance & Banking", "Healthcare & MedTech"],
         index=0,
-        help="Writers emphasise sector-relevant qualities (standards, metrics, compliance). "
-             "Generic works for any industry.",
+        help="Auto-detect reads the job description and picks the closest sector for you. "
+             "Choose a specific sector to override, or Generic for a neutral tone. "
+             "Writers emphasise sector-relevant qualities (standards, metrics, compliance).",
     )
 
     llm_config = {
@@ -555,7 +616,27 @@ with st.expander("Candidate Profile", expanded=not bool(st.session_state.profile
                 _detected = _extract_candidate_name(extracted, _fname)
                 if _detected and "candidate_name_input" not in st.session_state:
                     st.session_state["candidate_name_input"] = _detected
+                # Auto-fill Word Document Settings from CV (only if fields are currently empty)
+                _contact_updated = False
+                _ph = _extract_phone_from_text(extracted)
+                if _ph and not st.session_state.get("docx_phone_input", "").strip():
+                    st.session_state["docx_phone_input"] = _ph
+                    st.session_state.candidate_phone = _ph
+                    _contact_updated = True
+                _em = _extract_email_from_text(extracted)
+                if _em and not st.session_state.get("docx_email_input", "").strip():
+                    st.session_state["docx_email_input"] = _em
+                    st.session_state.candidate_email = _em
+                    _contact_updated = True
+                _ad = _extract_address_from_text(extracted)
+                if _ad and not st.session_state.get("docx_address_input", "").strip():
+                    st.session_state["docx_address_input"] = _ad
+                    st.session_state.candidate_address = _ad
+                    _contact_updated = True
                 st.success(f"Extracted text from {len(uploaded_files)} file(s). You can edit it below.")
+                if _contact_updated:
+                    # Sidebar rendered before file processing — rerun so widgets pick up detected values
+                    st.rerun()
             else:
                 st.warning("Could not extract text from the uploaded files.")
 
@@ -615,10 +696,10 @@ with st.expander("Candidate Profile", expanded=not bool(st.session_state.profile
 
     col_save, col_clear, _ = st.columns([1, 1, 5])
     with col_save:
-        if st.button("Save as default", help="Writes profile text to profile.py so it pre-loads next time"):
+        if st.button("Save as default", help="Writes profile text to profile_data.txt so it pre-loads next time"):
             if edited_profile.strip():
                 _save_profile_to_file(edited_profile.strip(), st.session_state.candidate_name)
-                st.success("Saved to profile.py")
+                st.success("Saved to profile_data.txt")
             else:
                 st.warning("Nothing to save — profile is empty.")
     with col_clear:
@@ -817,6 +898,10 @@ if st.session_state.results:
     st.success(
         f"Generated 2 English cover letters for **{job_meta['job_title']}** at **{job_meta['company']}**"
     )
+
+    _detected_industry = results.get("industry")
+    if _detected_industry:
+        st.caption(f"Industry context applied: **{_detected_industry}**")
 
     # ── MATCH SCORE CIRCLE ───────────────────
     # Show the deep-pipeline score (from full crew run).

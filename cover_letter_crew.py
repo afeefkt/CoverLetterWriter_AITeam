@@ -1,6 +1,6 @@
 """
 ============================================================
-  AFEEF'S COVER LETTER CREW
+  COVER LETTER CREW
   CrewAI-powered — generates 2 English cover letter variants per job
 
   CLI usage:
@@ -11,7 +11,7 @@
 
   Requirements:
     - DEEPSEEK_API_KEY set in .env  (cheapest option)
-    - OR Ollama running locally with qwen2.5:7b (free)
+    - OR Ollama running locally with qwen3.5:9b (free)
 ============================================================
 """
 
@@ -26,6 +26,12 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Disable crewai's OpenTelemetry phone-home before importing it — outbound HTTPS
+# is unreliable on some machines and each failed export blocks for seconds.
+os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+
 from crewai import Agent, Task, Crew, LLM
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
@@ -38,32 +44,149 @@ load_dotenv()
 # ─────────────────────────────────────────────
 
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL    = "qwen2.5:7b"
+OLLAMA_MODEL    = "qwen3.5:9b"
+
+# Context window for local Ollama models. Ollama's own default (~2-4k) silently
+# truncates the long task prompts, which wrecks output quality on local models.
+OLLAMA_NUM_CTX  = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
+
+
+def _strip_think(text: str) -> str:
+    """Remove qwen3-style <think>...</think> reasoning blocks from LLM output.
+
+    An unclosed <think> means generation was cut off mid-reasoning — everything
+    from there on is reasoning, not answer, so it is dropped too.
+    """
+    if not text:
+        return text or ""
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<think>.*\Z', '', text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
+
+def _no_think_suffix(llm_config: dict | None) -> str:
+    """Qwen3 soft switch: appending /no_think to a prompt disables thinking mode.
+    qwen3.5 REMOVED this switch (it ignores it and reasons about the stray token),
+    so it only applies to qwen3 tags. For the whole qwen3 family, thinking is also
+    disabled at the API level via reasoning_effort="none" (see _ollama_extra_body);
+    _strip_think() on every output path remains the last line of defense."""
+    if not llm_config:
+        return ""
+    model = str(llm_config.get("model", "")).lower()
+    if llm_config.get("backend") == "ollama" and "qwen3" in model and "qwen3.5" not in model:
+        return " /no_think"
+    return ""
+
+
+def _ollama_extra_body(model: str) -> dict:
+    """Raw JSON body fields for Ollama's OpenAI-compatible endpoint.
+
+    - options.num_ctx: raise Ollama's small default context window (its ~2-4k
+      default silently truncates this pipeline's long prompts).
+    - reasoning_effort "none": disables thinking for qwen3-family models
+      (qwen3, qwen3.5). Without it, thinking burns the max_tokens budget in the
+      separate `reasoning` field and `content` comes back empty. Verified
+      working against Ollama 0.31 (unknown fields are ignored by older versions).
+    """
+    body: dict = {"options": {"num_ctx": OLLAMA_NUM_CTX}}
+    if "qwen3" in model.lower():
+        body["reasoning_effort"] = "none"
+    return body
+
+
+def _ensure_ctx_model(model: str, base_url: str = OLLAMA_BASE_URL) -> str:
+    """Return the name of a derived model with num_ctx baked in, creating it on
+    the Ollama server if needed (e.g. 'qwen3.5:9b' -> 'qwen3.5:9b-ctx16384').
+
+    Ollama's OpenAI-compatible /v1 endpoint IGNORES per-request `options`
+    (verified on 0.31: the model loads with the ~4k default and long prompts get
+    silently truncated), so the context size must live in the model itself.
+    The derived model is metadata-only — it shares the base weights on disk.
+    Falls back to the base model name if creation fails.
+    """
+    if OLLAMA_NUM_CTX <= 0:
+        return model  # escape hatch: OLLAMA_NUM_CTX=0 disables the derived model
+    ctx_name = f"{model}-ctx{OLLAMA_NUM_CTX}"
+    if _model_is_pulled(ctx_name, base_url):
+        return ctx_name
+    try:
+        payload = _json.dumps({
+            "model": ctx_name,
+            "from": model,
+            "parameters": {"num_ctx": OLLAMA_NUM_CTX},
+            "stream": False,
+        }).encode()
+        req = urllib.request.Request(
+            f"{base_url}/api/create", data=payload,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            status = _json.loads(resp.read()).get("status", "")
+        if status == "success" and _model_is_pulled(ctx_name, base_url):
+            return ctx_name
+    except Exception:
+        pass
+    print(f"WARNING: could not create '{ctx_name}' — running with Ollama's "
+          f"default context window; long prompts may be truncated.")
+    return model
+
+
+def _model_size_b(model: str) -> float | None:
+    """Parse the parameter count (in billions) from a model tag like 'qwen3:8b'."""
+    m = re.search(r'(\d+(?:\.\d+)?)\s*b\b', model.lower())
+    return float(m.group(1)) if m else None
+
+
+def _is_small_local_model(llm_config: dict | None) -> bool:
+    """True for local Ollama models of ~9B or less — these get compact prompts
+    (covers the qwen3:8b / qwen3.5:9b default class; 14B+ get full prompts)."""
+    if not llm_config or llm_config.get("backend") != "ollama":
+        return False
+    size = _model_size_b(str(llm_config.get("model", "")))
+    return size is None or size <= 9
+
+
+def _is_localhost(base_url: str) -> bool:
+    from urllib.parse import urlparse
+    host = urlparse(base_url).hostname or ""
+    return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
 
 
 def _extract_name_from_profile(text: str) -> str:
-    """Multi-strategy regex name extraction — no LLM cost."""
-    m = re.search(r'(?i)(?:full\s+)?name\s*[:\-]\s*([A-Z][a-zA-ZÀ-ÿ]+(?:\s[A-Z][a-zA-ZÀ-ÿ]+){1,3})', text)
+    """Multi-strategy regex name extraction — no LLM cost.
+    Name parts are separated by [ \\t] (not \\s) so a labelled name never
+    swallows the following line ("Name: Jane Smith\\nEmbedded Engineer")."""
+    _part = r"[A-ZÀ-Þ][a-zA-ZÀ-ÿ'’\-]*"
+    m = re.search(rf'(?i)(?:full\s+)?name\s*[:\-][ \t]*({_part}(?:[ \t]{_part}){{1,3}})', text)
     if m:
         return m.group(1).strip()
     for line in text.strip().splitlines()[:15]:
         line = line.strip()
-        if 4 < len(line) < 50 and re.match(r'^[A-Z][a-zA-ZÀ-ÿ]+(\s[A-Z][a-zA-ZÀ-ÿ]+){1,3}$', line):
+        if 4 < len(line) < 50 and re.match(rf'^{_part}([ \t]{_part}){{1,3}}$', line):
             return line
     return ""
 
 
-def _ollama_is_running() -> bool:
+def _ollama_is_running(base_url: str = OLLAMA_BASE_URL) -> bool:
     try:
-        urllib.request.urlopen(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        urllib.request.urlopen(f"{base_url}/api/tags", timeout=3)
         return True
     except Exception:
         return False
 
 
-def _start_ollama(fatal: bool = True):
+def _start_ollama(fatal: bool = True, base_url: str = OLLAMA_BASE_URL):
     """Start Ollama in the background and wait until it responds.
-    If fatal=False, raises RuntimeError instead of sys.exit."""
+    If fatal=False, raises RuntimeError instead of sys.exit.
+    Only attempts to launch a server for localhost URLs — a remote Ollama
+    host cannot be started from this machine."""
+    if not _is_localhost(base_url):
+        msg = (f"Ollama at {base_url} is not reachable. "
+               "It is a remote host, so it cannot be auto-started — "
+               "check the URL and that Ollama is running there.")
+        if fatal:
+            print(f"ERROR: {msg}")
+            sys.exit(1)
+        raise RuntimeError(msg)
     print("Ollama not running — starting it now...")
     try:
         subprocess.Popen(
@@ -83,7 +206,7 @@ def _start_ollama(fatal: bool = True):
     for _ in range(30):
         time.sleep(1)
         print(".", end="", flush=True)
-        if _ollama_is_running():
+        if _ollama_is_running(base_url):
             print(" ready!")
             return
     msg = "Ollama did not start in time. Check your installation."
@@ -93,9 +216,9 @@ def _start_ollama(fatal: bool = True):
     raise RuntimeError(msg)
 
 
-def _model_is_pulled(model: str) -> bool:
+def _model_is_pulled(model: str, base_url: str = OLLAMA_BASE_URL) -> bool:
     try:
-        with urllib.request.urlopen(f"{OLLAMA_BASE_URL}/api/tags", timeout=5) as resp:
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=5) as resp:
             data = _json.loads(resp.read())
         local_names = [m["name"] for m in data.get("models", [])]
         # Exact match, or bare name (no tag) matches the `:latest` variant
@@ -132,11 +255,16 @@ def _ensure_ollama():
         print(f"Model '{OLLAMA_MODEL}' already available")
 
 
-def _ensure_ollama_or_raise(model: str):
+def _ensure_ollama_or_raise(model: str, base_url: str = OLLAMA_BASE_URL):
     """GUI-mode: auto-start Ollama and pull model; raises RuntimeError on failure."""
-    if not _ollama_is_running():
-        _start_ollama(fatal=False)
-    if not _model_is_pulled(model):
+    if not _ollama_is_running(base_url):
+        _start_ollama(fatal=False, base_url=base_url)
+    if not _model_is_pulled(model, base_url):
+        if not _is_localhost(base_url):
+            raise RuntimeError(
+                f"Model '{model}' is not available on the remote Ollama at {base_url}. "
+                f"Pull it there first: ollama pull {model}"
+            )
         _pull_model(model, fatal=False)
 
 
@@ -154,7 +282,7 @@ except ImportError:
 #  LLM FACTORY
 # ─────────────────────────────────────────────
 
-def get_llm(llm_config: dict | None = None) -> LLM:
+def get_llm(llm_config: dict | None = None, json_mode: bool = False) -> LLM:
     """
     Build an LLM instance for any supported backend.
 
@@ -167,9 +295,13 @@ def get_llm(llm_config: dict | None = None) -> LLM:
         api_key     : str   (overrides the corresponding env var)
         base_url    : str   (overrides default URL; required for openrouter)
 
+    json_mode: for the ollama backend, ask the server to constrain output to
+    valid JSON (used by the single-shot extraction calls). Ignored elsewhere —
+    _robust_json_extract() remains the fallback for cloud backends.
+
     If llm_config is None, uses env-based auto-detect (CLI backwards compat):
         DEEPSEEK_API_KEY → DeepSeek
-        else             → Ollama qwen2.5:7b
+        else             → local Ollama default model
     """
     if llm_config is None:
         api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -177,10 +309,12 @@ def get_llm(llm_config: dict | None = None) -> LLM:
             print("Using DeepSeek API")
             return LLM(model="deepseek/deepseek-chat", api_key=api_key,
                        temperature=0.7, max_tokens=3000)
-        print("No API key — using local Ollama (qwen2.5:7b)")
+        print(f"No API key — using local Ollama ({OLLAMA_MODEL})")
         _ensure_ollama()
-        return LLM(model=f"ollama/{OLLAMA_MODEL}", base_url=OLLAMA_BASE_URL,
-                   temperature=0.7, max_tokens=3000)
+        _model_eff = _ensure_ctx_model(OLLAMA_MODEL)
+        return LLM(model=f"ollama_chat/{_model_eff}", base_url=OLLAMA_BASE_URL,
+                   temperature=0.7, max_tokens=3000,
+                   extra_body=_ollama_extra_body(OLLAMA_MODEL))
 
     backend     = llm_config.get("backend", "ollama")
     model       = llm_config.get("model", OLLAMA_MODEL)
@@ -200,24 +334,34 @@ def get_llm(llm_config: dict | None = None) -> LLM:
 
     if backend == "ollama":
         _base = base_url or OLLAMA_BASE_URL
-        _ensure_ollama_or_raise(model)
-        return LLM(model=f"ollama/{model}", base_url=_base,
-                   temperature=temperature, max_tokens=max_tokens)
+        _ensure_ollama_or_raise(model, _base)
+        # The real context window lives in a derived model (_ensure_ctx_model) —
+        # Ollama's OpenAI-compatible endpoint ignores per-request options.
+        # reasoning_effort (thinking off for qwen3 family) rides in extra_body,
+        # which crewai's OpenAI-SDK client sends through as raw JSON body fields.
+        _model_eff = _ensure_ctx_model(model, _base)
+        _extra = {"response_format": {"type": "json_object"}} if json_mode else {}
+        return LLM(model=f"ollama_chat/{_model_eff}", base_url=_base,
+                   temperature=temperature, max_tokens=max_tokens,
+                   extra_body=_ollama_extra_body(model), **_extra)
 
     elif backend == "deepseek":
         key = _require_key("DEEPSEEK_API_KEY")
         return LLM(model=f"deepseek/{model}", api_key=key,
-                   temperature=temperature, max_tokens=max_tokens)
+                   temperature=temperature, max_tokens=max_tokens,
+                   timeout=180)
 
     elif backend == "anthropic":
         key = _require_key("ANTHROPIC_API_KEY")
         return LLM(model=f"anthropic/{model}", api_key=key,
-                   temperature=temperature, max_tokens=max_tokens)
+                   temperature=temperature, max_tokens=max_tokens,
+                   timeout=180)
 
     elif backend == "openai":
         key = _require_key("OPENAI_API_KEY")
         return LLM(model=model, api_key=key,
-                   temperature=temperature, max_tokens=max_tokens)
+                   temperature=temperature, max_tokens=max_tokens,
+                   timeout=180)
 
     elif backend == "gemini":
         key = _require_key("GOOGLE_API_KEY")
@@ -226,18 +370,21 @@ def get_llm(llm_config: dict | None = None) -> LLM:
         # model availability. The OpenAI-compatible endpoint supports the full range.
         return LLM(model=f"openai/{model}", api_key=key,
                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                   temperature=temperature, max_tokens=max_tokens)
+                   temperature=temperature, max_tokens=max_tokens,
+                   timeout=180)
 
     elif backend == "groq":
         key = _require_key("GROQ_API_KEY")
         return LLM(model=f"groq/{model}", api_key=key,
-                   temperature=temperature, max_tokens=max_tokens)
+                   temperature=temperature, max_tokens=max_tokens,
+                   timeout=180)
 
     elif backend == "openrouter":
         key = _require_key("OPENROUTER_API_KEY")
         _base = base_url or "https://openrouter.ai/api/v1"
         return LLM(model=f"openrouter/{model}", api_key=key, base_url=_base,
-                   temperature=temperature, max_tokens=max_tokens)
+                   temperature=temperature, max_tokens=max_tokens,
+                   timeout=180)
 
     else:
         raise ValueError(
@@ -252,7 +399,7 @@ def get_llm(llm_config: dict | None = None) -> LLM:
 
 def collect_raw_paste() -> str:
     print("\n" + "="*60)
-    print("  AFEEF'S COVER LETTER CREW")
+    print("  COVER LETTER CREW")
     print("="*60)
     print("\nPaste the FULL job page (copy everything from LinkedIn/job board).")
     print("Press Enter twice when done.\n")
@@ -313,10 +460,12 @@ def _robust_json_extract(text: str) -> dict | None:
     return None
 
 
-def clean_job_paste(raw: str, llm: LLM, interactive: bool = True) -> dict:
+def clean_job_paste(raw: str, llm: LLM, interactive: bool = True,
+                    no_think: str = "") -> dict:
     """
     Use an LLM agent to strip UI noise and extract structured job data.
     Set interactive=False for Streamlit (skips input() confirmation).
+    no_think: pass _no_think_suffix(llm_config) to disable qwen3 thinking mode.
     """
     cleaner = Agent(
         role="Job Page Parser",
@@ -344,14 +493,14 @@ Return ONLY the JSON object. No markdown fences, no explanation.
 
 RAW TEXT:
 {raw}
-""",
+{no_think}""",
         agent=cleaner,
         expected_output='JSON object with keys: company_name, job_title, location, ref_number, job_description'
     )
 
     mini_crew = Crew(agents=[cleaner], tasks=[parse_task], verbose=False)
     result    = mini_crew.kickoff()
-    raw_out   = str(result).strip()
+    raw_out   = _strip_think(str(result).strip())
 
     data = _robust_json_extract(raw_out)
     if data is None:
@@ -398,6 +547,7 @@ def _parse_reviewer_output(text: str) -> dict:
     Returns a dict with those keys; empty string if a section wasn't found.
     """
     import re
+    text    = _strip_think(text)
     keys    = ["en_formal", "en_modern"]
     labels  = ["EN_FORMAL_FINAL", "EN_MODERN_FINAL"]
     pattern = "|".join(re.escape(l) for l in labels)
@@ -456,11 +606,13 @@ CV text:
 """
 
 
-def parse_profile(profile_text: str, llm: LLM) -> dict:
+def parse_profile(profile_text: str, llm: LLM, no_think: str = "") -> dict:
     """One LLM call → structured profile dict. Fallback: {"raw": profile_text}."""
     import json as _json_mod
     try:
-        raw = llm.call([{"role": "user", "content": _PARSE_PROFILE_PROMPT + profile_text[:4000]}])
+        raw = llm.call([{"role": "user",
+                         "content": _PARSE_PROFILE_PROMPT + profile_text[:8000] + no_think}])
+        raw = _strip_think(raw if isinstance(raw, str) else str(raw))
         m = re.search(r'\{[\s\S]+\}', raw)
         if m:
             return _json_mod.loads(m.group(0))
@@ -514,165 +666,73 @@ _INDUSTRY_CONTEXT = {
 }
 
 
-def build_crew(job: dict, llm: LLM, profile_text: str | None = None, step_callback=None,
-               candidate_name: str = "the candidate",
-               structured_profile: dict | None = None,
-               industry: str = "Generic") -> Crew:
+# Whole-word / phrase signatures used to auto-detect the industry from a JD.
+# Kept discriminative on purpose — standards, tools and domain nouns rather than
+# generic words — so a single strong hit is meaningful.
+_INDUSTRY_KEYWORDS = {
+    "Aerospace & Defence": [
+        "aerospace", "avionics", "aircraft", "aviation", "airborne", "flight control",
+        "defence", "defense", "do-178", "do-254", "arp4754", "arp 4754",
+        "satellite", "spacecraft", "radar", "missile", "uav", "fighter",
+    ],
+    "Automotive & Embedded": [
+        "automotive", "autosar", "iso 26262", "iso26262", "aspice", "a-spice",
+        "ecu", "adas", "in-vehicle", "powertrain", "misra", "functional safety",
+        "asil", "motor control", "battery management", "vehicle dynamics",
+    ],
+    "Software Engineering": [
+        "software engineer", "backend", "back-end", "frontend", "front-end",
+        "full-stack", "fullstack", "microservices", "kubernetes", "docker",
+        "devops", "aws", "azure", "react", "node.js", "saas",
+        "scalability", "web application", "rest api", "distributed systems",
+    ],
+    "Finance & Banking": [
+        "finance", "banking", "fintech", "trading", "investment", "hedge fund",
+        "payments", "insurance", "financial services", "quantitative", "quant",
+        "risk management", "capital markets", "asset management", "brokerage",
+    ],
+    "Healthcare & MedTech": [
+        "healthcare", "medtech", "medical device", "iec 62304", "iso 13485",
+        "clinical", "patient", "diagnostic", "pharmaceutical", "biomedical",
+        "fda", "ce marking", "in-vitro", "hospital",
+    ],
+}
+
+# Values that mean "please pick the industry for me" rather than a fixed sector.
+_AUTO_INDUSTRY_SENTINELS = {"", "auto", "auto-detect", "auto-detect (from jd)"}
+
+
+def infer_industry(job: dict) -> str:
+    """Guess the target industry from a parsed job dict via keyword scoring.
+
+    The job title is weighted 3x (it is the strongest single signal), then the
+    description/company/location body. Returns 'Generic' when nothing scores,
+    so the writers fall back to a neutral tone rather than a wrong sector.
     """
-    Build and return a 7-agent, 8-task CrewAI Crew (English-only pipeline).
-    profile_text  : raw CV text (fallback if structured_profile not supplied)
-    structured_profile : pre-parsed profile dict from parse_profile()
-    candidate_name: used in sign-offs and writer context headers
-    industry      : sector hint injected into each writer task
-    """
-    _profile = profile_text if profile_text is not None else CANDIDATE_PROFILE
-    _profile_block = _format_structured_profile(structured_profile) if structured_profile else _profile
-    _ref     = job['ref_number'] if job['ref_number'] else 'N/A'
-    _industry_ctx = _INDUSTRY_CONTEXT.get(industry, "")
+    title = (job.get("job_title") or "").lower()
+    body  = " ".join(str(job.get(k) or "") for k in ("job_desc", "company", "location")).lower()
 
-    # ══════════════════════════════════════════
-    #  AGENTS
-    # ══════════════════════════════════════════
+    scores: dict[str, int] = {}
+    for industry, terms in _INDUSTRY_KEYWORDS.items():
+        score = 0
+        for term in terms:
+            pat = r"\b" + re.escape(term) + r"\b"
+            score += 3 * len(re.findall(pat, title))
+            score += len(re.findall(pat, body))
+        scores[industry] = score
 
-    job_analyst = Agent(
-        role="Job Analyst",
-        goal="Extract the key technical requirements, must-haves, and culture signals from a job description.",
-        backstory="Expert technical recruiter with 15 years in embedded systems and aerospace hiring. Reads JDs instantly and spots what really matters.",
-        llm=llm, verbose=False
-    )
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "Generic"
 
-    resume_analyzer = Agent(
-        role="Resume Analyzer",
-        goal="Deeply analyse the candidate's CV and produce a structured skills and experience breakdown.",
-        backstory="Senior career consultant specialising in STEM profiles. Extracts concrete skills, domain expertise, and standout achievements from CVs.",
-        llm=llm, verbose=False
-    )
 
-    skill_gap_mapper = Agent(
-        role="Skill Gap Mapper",
-        goal="Compare the job requirements against the candidate's profile and identify strong matches, partial matches, and gaps.",
-        backstory="Talent analyst who maps candidate profiles to job requirements with precision. Knows how to frame gaps honestly without hurting the application.",
-        llm=llm, verbose=False
-    )
+def _resolve_industry(industry: str | None, job: dict) -> str:
+    """Turn an 'Auto-detect' request (or blank) into a concrete sector."""
+    if industry is None or str(industry).strip().lower() in _AUTO_INDUSTRY_SENTINELS:
+        return infer_industry(job)
+    return industry
 
-    ats_optimizer = Agent(
-        role="ATS Keyword Optimizer",
-        goal="Identify the exact ATS keywords from the job description and create keyword-enriched talking points the writers must use.",
-        backstory="ATS systems expert who knows that 75% of CVs are rejected by algorithms before a human reads them. Ensures the right keywords appear naturally in the letter.",
-        llm=llm, verbose=False
-    )
 
-    en_formal_writer = Agent(
-        role="Formal English Cover Letter Writer",
-        goal="Write a formal, professional English cover letter using the ATS-optimized analysis.",
-        backstory="Writes polished formal business letters for aerospace and defence companies. Structured paragraphs, confident tone, traditional style. Max 4 paragraphs.",
-        llm=llm, verbose=False
-    )
-
-    en_modern_writer = Agent(
-        role="Modern English Cover Letter Writer",
-        goal="Write a direct, confident, modern English cover letter using the ATS-optimized analysis.",
-        backstory="Writes punchy, direct cover letters that open with the strongest hook. No filler phrases, no corporate speak. Max 4 paragraphs.",
-        llm=llm, verbose=False
-    )
-
-    fact_checker = Agent(
-        role="Cover Letter Fact Checker",
-        goal="Find every claim in the cover letters that cannot be verified from the candidate profile. Produce a structured violation report.",
-        backstory="Rigorous fact-checking editor for engineering cover letters. Sole job is finding unverifiable claims — does NOT evaluate writing quality or style.",
-        llm=llm, verbose=False
-    )
-
-    tone_grammar_reviewer = Agent(
-        role="Tone and Grammar Reviewer",
-        goal="Apply fact-check corrections and review both English cover letter drafts for robotic AI language, grammar errors, and incorrect technical terms. Output corrected versions.",
-        backstory="Senior editor who has reviewed thousands of engineering job applications. Catches AI-sounding phrases instantly and rewrites them to sound natural and human.",
-        llm=llm, verbose=False
-    )
-
-    # ══════════════════════════════════════════
-    #  TASKS
-    # ══════════════════════════════════════════
-
-    # Task 0 — Job Analysis
-    jd_task = Task(
-        description=f"""
-Analyse this job description. Be concise.
-
-POSITION: {job['job_title']} at {job['company']}
-LOCATION: {job['location']}
-
-JOB DESCRIPTION:
-{job['job_desc']}
-
-Output EXACTLY:
-
-TECHNICAL_REQUIREMENTS:
-1. [requirement]
-2. [requirement]
-3. [requirement]
-4. [requirement]
-5. [requirement]
-
-SOFT_SKILLS:
-1. [skill]
-2. [skill]
-3. [skill]
-
-KEYWORDS: [comma-separated — exact terms from the JD]
-
-TOOLS_AND_STANDARDS: [comma-separated]
-
-COMPANY_CULTURE: [1 sentence on company culture/values from the JD]
-""",
-        agent=job_analyst,
-        expected_output="Structured JD analysis: TECHNICAL_REQUIREMENTS, SOFT_SKILLS, KEYWORDS, TOOLS_AND_STANDARDS, COMPANY_CULTURE"
-    )
-
-    # Task 1 — Resume Analysis
-    resume_task = Task(
-        description=f"""
-Analyse this candidate's CV. Be specific — extract concrete facts, not vague summaries.
-
-CANDIDATE PROFILE:
-{_profile_block}
-
-Output EXACTLY:
-
-CORE_TECHNICAL_SKILLS:
-[comma-separated list of specific skills]
-
-DOMAIN_EXPERTISE:
-[comma-separated domains, e.g. AUTOSAR, Motor Control, Aerospace Systems]
-
-EXPERIENCE_HIGHLIGHTS:
-1. [Role at Company — key technical achievement in one sentence]
-2. [Role at Company — key technical achievement]
-3. [Role at Company — key technical achievement]
-
-STANDARDS_AND_CERTS:
-[comma-separated: ISO 26262, A-SPICE, MISRA C, DO-178C, etc.]
-
-UNIQUE_BACKGROUND:
-[1 sentence on what makes this candidate rare or unusual]
-
-LANGUAGE_SKILLS:
-[languages and proficiency level]
-""",
-        agent=resume_analyzer,
-        expected_output="Structured CV analysis: CORE_TECHNICAL_SKILLS, DOMAIN_EXPERTISE, EXPERIENCE_HIGHLIGHTS, STANDARDS_AND_CERTS, UNIQUE_BACKGROUND, LANGUAGE_SKILLS"
-    )
-
-    # Task 2 — Skill Gap Mapping + Truth Anchor
-    gap_task = Task(
-        description=f"""
-Using the JD Analysis (Task 0) and the Resume Analysis (Task 1), map the candidate to this role.
-
-══════════════════════════════════════════════════════
-UNIVERSAL DOMAIN TRUTH RULES — apply these before writing any output section.
-These rules apply to ALL profiles and ALL industries.
-══════════════════════════════════════════════════════
-
+_TRUTH_RULES_FULL = """\
 RULE 1 — EQUIVALENCE:
 Adjacent experience is NOT the same as direct expertise. Having background in field A
 does not make someone an expert in field B, even if A and B are related.
@@ -717,7 +777,201 @@ RULE 5 — SAFE FRAMING TEMPLATES (use these for partial/weak/missing items):
   Moderate adjacent: "My work in [profile domain] involved [specific transferable aspect] relevant to [JD domain]."
   Weak/missing: "While [JD skill] is an area I am building toward, my [closest profile skill] gives me [specific transferable element]."
   Domain bridge: "[Profile domain] and [JD domain] share [specific common element] — my background in the former applies directly."
+"""
 
+# Compact variant for small local models (≤8B): same rules, fewer examples, less
+# prose — long prompts measurably degrade instruction-following on small models.
+_TRUTH_RULES_COMPACT = """\
+RULE 1 — EQUIVALENCE: adjacent experience is NOT direct expertise. Examples:
+  × control systems ≠ propulsion · embedded software ≠ systems engineering
+  × motor/drive control ≠ engine design · automotive embedded ≠ aerospace structures
+  × simulation/modelling ≠ CFD/FEA · general programming ≠ safety-critical programming
+  Adjacent = transferable foundation, NOT interchangeable.
+
+RULE 2 — JOB TITLES: only use a job title if it (or a close synonym) appears in the profile.
+
+RULE 3 — TOOLS: only mention a tool/language explicitly named in the profile.
+If the JD requires it but the profile lacks it → put it in PROHIBITED_CLAIMS.
+
+RULE 4 — CLAIM STRENGTH: "expertise" needs measurable outcomes; "experience" needs one
+concrete project; "exposure" for single mentions. Never overstate.
+
+RULE 5 — SAFE FRAMING for partial/missing items, e.g.:
+  "My work in [profile domain] involved [transferable aspect] relevant to [JD domain]."
+  "While [JD skill] is an area I am building toward, my [profile skill] gives me [transferable element]."
+"""
+
+
+def build_crew(job: dict, llm: LLM, profile_text: str | None = None, step_callback=None,
+               candidate_name: str = "the candidate",
+               structured_profile: dict | None = None,
+               industry: str = "Generic",
+               analysis_llm: LLM | None = None,
+               small_model: bool = False,
+               no_think: str = "") -> Crew:
+    """
+    Build and return a 7-agent, 8-task CrewAI Crew (English-only pipeline).
+    profile_text  : raw CV text (fallback if structured_profile not supplied)
+    structured_profile : pre-parsed profile dict from parse_profile()
+    candidate_name: used in sign-offs and writer context headers
+    industry      : sector hint injected into each writer task
+    analysis_llm  : low-temperature LLM for the structured analysis tasks
+                    (JD/resume/gap/ATS/fact-check); defaults to `llm`
+    small_model   : use compact prompt variants (small local models)
+    no_think      : suffix appended to every task ("/no_think" for qwen3 via Ollama)
+    """
+    _profile = profile_text if profile_text is not None else CANDIDATE_PROFILE
+    _profile_block = _format_structured_profile(structured_profile) if structured_profile else _profile
+    _ref     = job['ref_number'] if job['ref_number'] else 'N/A'
+    industry = _resolve_industry(industry, job)
+    _industry_ctx = _INDUSTRY_CONTEXT.get(industry, "")
+    analysis_llm = analysis_llm or llm
+    _truth_rules = _TRUTH_RULES_COMPACT if small_model else _TRUTH_RULES_FULL
+
+    # ══════════════════════════════════════════
+    #  AGENTS
+    # ══════════════════════════════════════════
+
+    job_analyst = Agent(
+        role="Job Analyst",
+        goal="Extract the key technical requirements, must-haves, and culture signals from a job description.",
+        backstory="Expert technical recruiter with 15 years in embedded systems and aerospace hiring. Reads JDs instantly and spots what really matters.",
+        llm=analysis_llm, verbose=False
+    )
+
+    resume_analyzer = Agent(
+        role="Resume Analyzer",
+        goal="Deeply analyse the candidate's CV and produce a structured skills and experience breakdown.",
+        backstory="Senior career consultant specialising in STEM profiles. Extracts concrete skills, domain expertise, and standout achievements from CVs.",
+        llm=analysis_llm, verbose=False
+    )
+
+    skill_gap_mapper = Agent(
+        role="Skill Gap Mapper",
+        goal="Compare the job requirements against the candidate's profile and identify strong matches, partial matches, and gaps.",
+        backstory="Talent analyst who maps candidate profiles to job requirements with precision. Knows how to frame gaps honestly without hurting the application.",
+        llm=analysis_llm, verbose=False
+    )
+
+    ats_optimizer = Agent(
+        role="ATS Keyword Optimizer",
+        goal="Identify the exact ATS keywords from the job description and create keyword-enriched talking points the writers must use.",
+        backstory="ATS systems expert who knows that 75% of CVs are rejected by algorithms before a human reads them. Ensures the right keywords appear naturally in the letter.",
+        llm=analysis_llm, verbose=False
+    )
+
+    en_formal_writer = Agent(
+        role="Formal English Cover Letter Writer",
+        goal="Write a formal, professional English cover letter using the ATS-optimized analysis.",
+        backstory="Writes polished formal business letters for aerospace and defence companies. Structured paragraphs, confident tone, traditional style. Max 4 paragraphs.",
+        llm=llm, verbose=False
+    )
+
+    en_modern_writer = Agent(
+        role="Modern English Cover Letter Writer",
+        goal="Write a direct, confident, modern English cover letter using the ATS-optimized analysis.",
+        backstory="Writes punchy, direct cover letters that open with the strongest hook. No filler phrases, no corporate speak. Max 4 paragraphs.",
+        llm=llm, verbose=False
+    )
+
+    fact_checker = Agent(
+        role="Cover Letter Fact Checker",
+        goal="Find every claim in the cover letters that cannot be verified from the candidate profile. Produce a structured violation report.",
+        backstory="Rigorous fact-checking editor for engineering cover letters. Sole job is finding unverifiable claims — does NOT evaluate writing quality or style.",
+        llm=analysis_llm, verbose=False
+    )
+
+    tone_grammar_reviewer = Agent(
+        role="Tone and Grammar Reviewer",
+        goal="Apply fact-check corrections and review both English cover letter drafts for robotic AI language, grammar errors, and incorrect technical terms. Output corrected versions.",
+        backstory="Senior editor who has reviewed thousands of engineering job applications. Catches AI-sounding phrases instantly and rewrites them to sound natural and human.",
+        llm=llm, verbose=False
+    )
+
+    # ══════════════════════════════════════════
+    #  TASKS
+    # ══════════════════════════════════════════
+
+    # Task 0 — Job Analysis
+    jd_task = Task(
+        description=f"""
+Analyse this job description. Be concise.
+
+POSITION: {job['job_title']} at {job['company']}
+LOCATION: {job['location']}
+
+JOB DESCRIPTION:
+{job['job_desc']}
+
+Output EXACTLY:
+
+TECHNICAL_REQUIREMENTS:
+1. [requirement]
+2. [requirement]
+3. [requirement]
+4. [requirement]
+5. [requirement]
+
+SOFT_SKILLS:
+1. [skill]
+2. [skill]
+3. [skill]
+
+KEYWORDS: [comma-separated — exact terms from the JD]
+
+TOOLS_AND_STANDARDS: [comma-separated]
+
+COMPANY_CULTURE: [1 sentence on company culture/values from the JD]
+{no_think}""",
+        agent=job_analyst,
+        expected_output="Structured JD analysis: TECHNICAL_REQUIREMENTS, SOFT_SKILLS, KEYWORDS, TOOLS_AND_STANDARDS, COMPANY_CULTURE"
+    )
+
+    # Task 1 — Resume Analysis
+    resume_task = Task(
+        description=f"""
+Analyse this candidate's CV. Be specific — extract concrete facts, not vague summaries.
+
+CANDIDATE PROFILE:
+{_profile_block}
+
+Output EXACTLY:
+
+CORE_TECHNICAL_SKILLS:
+[comma-separated list of specific skills]
+
+DOMAIN_EXPERTISE:
+[comma-separated domains, e.g. AUTOSAR, Motor Control, Aerospace Systems]
+
+EXPERIENCE_HIGHLIGHTS:
+1. [Role at Company — key technical achievement in one sentence]
+2. [Role at Company — key technical achievement]
+3. [Role at Company — key technical achievement]
+
+STANDARDS_AND_CERTS:
+[comma-separated: ISO 26262, A-SPICE, MISRA C, DO-178C, etc.]
+
+UNIQUE_BACKGROUND:
+[1 sentence on what makes this candidate rare or unusual]
+
+LANGUAGE_SKILLS:
+[languages and proficiency level]
+{no_think}""",
+        agent=resume_analyzer,
+        expected_output="Structured CV analysis: CORE_TECHNICAL_SKILLS, DOMAIN_EXPERTISE, EXPERIENCE_HIGHLIGHTS, STANDARDS_AND_CERTS, UNIQUE_BACKGROUND, LANGUAGE_SKILLS"
+    )
+
+    # Task 2 — Skill Gap Mapping + Truth Anchor
+    gap_task = Task(
+        description=f"""
+Using the JD Analysis (Task 0) and the Resume Analysis (Task 1), map the candidate to this role.
+
+══════════════════════════════════════════════════════
+UNIVERSAL DOMAIN TRUTH RULES — apply these before writing any output section.
+These rules apply to ALL profiles and ALL industries.
+══════════════════════════════════════════════════════
+
+{_truth_rules}
 ══════════════════════════════════════════════════════
 Now apply these rules and output EXACTLY the following sections:
 ══════════════════════════════════════════════════════
@@ -752,7 +1006,7 @@ If AEROSPACE_FLAG is YES, also output:
 DOMAIN_HIGHLIGHT: [The candidate's most relevant prior experience in aerospace, aviation, defence, or
 any safety-critical regulated domain — from the profile only. What they did, which standards or tools
 were involved, and how it connects to THIS job. Do not invent.]
-""",
+{no_think}""",
         agent=skill_gap_mapper,
         expected_output="Truth-anchored skill map: STRONG_MATCHES, PARTIAL_MATCHES, PROHIBITED_CLAIMS, SAFE_FRAMING, OPENING_HOOK, UNIQUE_ANGLE, AEROSPACE_FLAG, DOMAIN_HIGHLIGHT (if aerospace)",
         context=[jd_task, resume_task]
@@ -783,11 +1037,78 @@ KEYWORD_TALKING_POINTS:
 
 ATS_OPENING_EN: [opening hook in English — embeds top 2 English keywords]
 ATS_OPENING_DE: [opening hook in German — embeds top 2 German keywords]
-""",
+{no_think}""",
         agent=ats_optimizer,
         expected_output="ATS optimization: MUST_USE_KEYWORDS, KEYWORD_TALKING_POINTS, ATS_OPENING",
         context=[jd_task, gap_task]
     )
+
+    # Shared writer rules — full for cloud models, compact for small local models
+    # (long rule lists measurably degrade instruction-following on ≤8B models).
+    _exempt_nouns = ("DO-178C, AUTOSAR, VxWorks, ASIL B, MISRA C, MIL/SIL/HIL, CANoe, "
+                     "WinIdea, Simulink, DOORS, FOC, IPMSM, MXAM, Polyspace, TESSY, A-SPICE")
+    if small_model:
+        _formal_rules = f"""\
+STRICT RULES:
+- ENGLISH ONLY: translate any German JD term using MUST_USE_KEYWORDS_EN. Keep these
+  technical proper nouns exactly as-is: {_exempt_nouns}.
+- STYLE: formal flowing prose with connector words (Moreover, Furthermore). No em-dashes.
+- OPENER: do NOT start with "With extensive experience in..." — open with a specific achievement.
+- TRUTH: never claim any skill, tool, or job title listed in PROHIBITED_CLAIMS (Task 2) —
+  use the exact SAFE_FRAMING sentence instead. Never invent years of experience.
+- If AEROSPACE_FLAG is YES, Para 2 MUST use DOMAIN_HIGHLIGHT from Task 2.
+- Do NOT address the recruiter agency as the employer — use the company name from the header.
+Output ONLY the letter body. No subject line, no date, no commentary, no markdown."""
+        _modern_rules = f"""\
+STRICT RULES:
+- ENGLISH ONLY: translate any German JD term using MUST_USE_KEYWORDS_EN. Keep these
+  technical proper nouns exactly as-is: {_exempt_nouns}.
+- STYLE: short declarative sentences. Em-dashes (—) for emphasis. No connector words
+  like "Furthermore", "Moreover", "Additionally".
+- OPENER: do NOT start with "With extensive experience in..." — open with a punchy specific fact.
+- TRUTH: never claim any skill, tool, or job title listed in PROHIBITED_CLAIMS (Task 2) —
+  use the exact SAFE_FRAMING sentence instead. Never invent years of experience.
+- If AEROSPACE_FLAG is YES, Para 2 MUST use DOMAIN_HIGHLIGHT from Task 2.
+- Do NOT address the recruiter agency as the employer — use the company name from the header.
+Output ONLY the letter body. No subject line, no date, no commentary, no markdown."""
+    else:
+        _formal_rules = f"""\
+STRICT RULES:
+- LANGUAGE: Do NOT write any German word in this letter. If a term from the JD is in German,
+  translate it using MUST_USE_KEYWORDS_EN — never embed the German form.
+  These technical proper nouns are exempt (keep exactly as-is): {_exempt_nouns}.
+  All other words must be English.
+- STYLE: Formal flowing prose. Use connector words (Moreover, Furthermore, Additionally).
+  Sentences may be long with subordinate clauses. No em-dashes for emphasis.
+- OPENER: Do NOT start Para 1 with "With extensive experience in..." — open with a specific
+  achievement or direct value statement (e.g. "DO-178C compliance has been central to my work...")
+- TRUTH CONSTRAINT: Do NOT claim expertise in any skill listed under PROHIBITED_CLAIMS from Task 2.
+  If the job requires it, use ONLY the exact sentence from SAFE_FRAMING from Task 2 — nothing stronger.
+  Do NOT call the candidate a job title (e.g. "propulsion engineer", "ML engineer") unless that exact
+  title appears in their profile. Do NOT mention any tool or standard not in the candidate profile.
+- Do NOT invent years of experience — only use durations explicitly stated in the profile above.
+- If AEROSPACE_FLAG is YES, Para 2 MUST use DOMAIN_HIGHLIGHT from Task 2.
+- Do NOT address the recruiter agency as the employer — use the company name from the position header.
+Output ONLY the letter body. No subject line, no date, no commentary, no markdown."""
+        _modern_rules = f"""\
+STRICT RULES:
+- LANGUAGE: Do NOT write any German word in this letter. If a term from the JD is in German,
+  translate it using MUST_USE_KEYWORDS_EN — never embed the German form.
+  These technical proper nouns are exempt (keep exactly as-is): {_exempt_nouns}.
+  All other words must be English.
+- STYLE: Short declarative sentences only. Use em-dashes (—) for emphasis. Zero connector words
+  like "Furthermore", "Moreover", "Additionally" — each sentence must stand alone.
+- OPENER: Do NOT start Para 1 with "With extensive experience in..." — open with a punchy
+  specific fact drawn from the candidate profile (e.g. "Safety-critical embedded software in C —
+  that is my domain." or state a specific role/achievement that directly matches the JD)
+- TRUTH CONSTRAINT: Do NOT claim expertise in any skill listed under PROHIBITED_CLAIMS from Task 2.
+  If the job requires it, use ONLY the exact sentence from SAFE_FRAMING from Task 2 — nothing stronger.
+  Do NOT call the candidate a job title (e.g. "propulsion engineer", "ML engineer") unless that exact
+  title appears in their profile. Do NOT mention any tool or standard not in the candidate profile.
+- Do NOT invent years of experience — only use durations explicitly stated in the profile above.
+- If AEROSPACE_FLAG is YES, Para 2 MUST use DOMAIN_HIGHLIGHT from Task 2.
+- Do NOT address the recruiter agency as the employer — use the company name from the position header.
+Output ONLY the letter body. No subject line, no date, no commentary, no markdown."""
 
     # Task 4 — EN Formal
     en_formal_task = Task(
@@ -827,25 +1148,8 @@ PARAGRAPH 4 — Closing (2–3 sentences):
 Express clear interest in discussing further. State you look forward to an interview.
 Sign off: "Mit freundlichen Grüßen / Kind regards,\\n{candidate_name}"
 
-STRICT RULES:
-- LANGUAGE: Do NOT write any German word in this letter. If a term from the JD is in German,
-  translate it using MUST_USE_KEYWORDS_EN — never embed the German form.
-  These technical proper nouns are exempt (keep exactly as-is): DO-178C, AUTOSAR, VxWorks,
-  ASIL B, MISRA C, MIL/SIL/HIL, CANoe, WinIdea, Simulink, DOORS, FOC, IPMSM, MXAM,
-  Polyspace, TESSY, A-SPICE. All other words must be English.
-- STYLE: Formal flowing prose. Use connector words (Moreover, Furthermore, Additionally).
-  Sentences may be long with subordinate clauses. No em-dashes for emphasis.
-- OPENER: Do NOT start Para 1 with "With extensive experience in..." — open with a specific
-  achievement or direct value statement (e.g. "DO-178C compliance has been central to my work...")
-- TRUTH CONSTRAINT: Do NOT claim expertise in any skill listed under PROHIBITED_CLAIMS from Task 2.
-  If the job requires it, use ONLY the exact sentence from SAFE_FRAMING from Task 2 — nothing stronger.
-  Do NOT call the candidate a job title (e.g. "propulsion engineer", "ML engineer") unless that exact
-  title appears in their profile. Do NOT mention any tool or standard not in the candidate profile.
-- Do NOT invent years of experience — only use durations explicitly stated in the profile above.
-- If AEROSPACE_FLAG is YES, Para 2 MUST use DOMAIN_HIGHLIGHT from Task 2.
-- Do NOT address the recruiter agency as the employer — use the company name from the position header.
-Output ONLY the letter body. No subject line, no date, no commentary, no markdown.
-""",
+{_formal_rules}
+{no_think}""",
         agent=en_formal_writer,
         expected_output="Formal English cover letter body, exactly 4 paragraphs, plain text",
         context=[jd_task, gap_task, ats_task]
@@ -889,26 +1193,8 @@ PARAGRAPH 4 — Closing (2 sentences):
 Direct call to action — invite them to discuss. No over-polite hedging.
 Sign off: "Best regards,\\n{candidate_name}"
 
-STRICT RULES:
-- LANGUAGE: Do NOT write any German word in this letter. If a term from the JD is in German,
-  translate it using MUST_USE_KEYWORDS_EN — never embed the German form.
-  These technical proper nouns are exempt (keep exactly as-is): DO-178C, AUTOSAR, VxWorks,
-  ASIL B, MISRA C, MIL/SIL/HIL, CANoe, WinIdea, Simulink, DOORS, FOC, IPMSM, MXAM,
-  Polyspace, TESSY, A-SPICE. All other words must be English.
-- STYLE: Short declarative sentences only. Use em-dashes (—) for emphasis. Zero connector words
-  like "Furthermore", "Moreover", "Additionally" — each sentence must stand alone.
-- OPENER: Do NOT start Para 1 with "With extensive experience in..." — open with a punchy
-  specific fact drawn from the candidate profile (e.g. "Safety-critical embedded software in C —
-  that is my domain." or state a specific role/achievement that directly matches the JD)
-- TRUTH CONSTRAINT: Do NOT claim expertise in any skill listed under PROHIBITED_CLAIMS from Task 2.
-  If the job requires it, use ONLY the exact sentence from SAFE_FRAMING from Task 2 — nothing stronger.
-  Do NOT call the candidate a job title (e.g. "propulsion engineer", "ML engineer") unless that exact
-  title appears in their profile. Do NOT mention any tool or standard not in the candidate profile.
-- Do NOT invent years of experience — only use durations explicitly stated in the profile above.
-- If AEROSPACE_FLAG is YES, Para 2 MUST use DOMAIN_HIGHLIGHT from Task 2.
-- Do NOT address the recruiter agency as the employer — use the company name from the position header.
-Output ONLY the letter body. No subject line, no date, no commentary, no markdown.
-""",
+{_modern_rules}
+{no_think}""",
         agent=en_modern_writer,
         expected_output="Modern English cover letter body, exactly 4 paragraphs, plain text",
         context=[jd_task, gap_task, ats_task]
@@ -957,15 +1243,45 @@ Total CALIBRATION issues: N
 
 If there are no violations of a type, write NONE for that type. Do not skip the section.
 Do NOT rewrite any letter — only report violations with exact replacement phrases.
-""",
+{no_think}""",
         agent=fact_checker,
         expected_output="Structured violation report: EN_FORMAL_VIOLATIONS and EN_MODERN_VIOLATIONS with HARD/SOFT/CALIBRATION/PASS sections, plus SUMMARY counts",
         context=[en_formal_task, en_modern_task, gap_task, resume_task]
     )
 
     # Task 7 — Tone + Grammar Review (final output)
-    review_task = Task(
-        description=f"""
+    if small_model:
+        _review_description = f"""
+You have two cover letter drafts (EN Formal, EN Modern) and a VIOLATION REPORT from the Fact Checker.
+
+Revise each letter, applying ALL of the following:
+
+1. APPLY FACT-CHECK CORRECTIONS — fix every HARD, SOFT, and CALIBRATION violation in the
+   VIOLATION REPORT (Task 6) exactly as specified. Do not argue with the report.
+2. SALUTATION — each letter MUST begin with "Dear Hiring Manager," on the very first line.
+3. ENGLISH ONLY — replace any German word with its English equivalent (technical proper
+   nouns like AUTOSAR, DO-178C, MISRA C, CANoe, Simulink stay as-is).
+4. BANNED PHRASES — remove and replace with specific concrete language:
+   "I am passionate about", "I am excited to", "I am writing to express", "leverage",
+   "I believe I would be a great fit", "dynamic team", "aligns perfectly",
+   "With extensive experience in", "I am confident that", "I am well-suited".
+5. PARAGRAPHS — each letter must have EXACTLY 4 paragraphs, each with at least 3 sentences.
+   Expand thin paragraphs with concrete evidence from context (roles, companies, achievements).
+6. SIGN-OFF — each letter must end with "{candidate_name}" on its own line:
+   - EN Formal: "Mit freundlichen Grüßen / Kind regards,\\n{candidate_name}"
+   - EN Modern: "Best regards,\\n{candidate_name}"
+7. Fix grammar errors. Do not introduce new ones.
+
+Output BOTH revised letters in EXACTLY this format (no extra text before or after):
+
+EN_FORMAL_FINAL:
+[revised formal English letter]
+
+EN_MODERN_FINAL:
+[revised modern English letter]
+{no_think}"""
+    else:
+        _review_description = f"""
 You have two cover letter drafts (EN Formal, EN Modern) and a VIOLATION REPORT from the Fact Checker.
 
 Review each letter and fix ALL of the following IN ORDER:
@@ -1022,7 +1338,10 @@ EN_FORMAL_FINAL:
 
 EN_MODERN_FINAL:
 [revised modern English letter]
-""",
+{no_think}"""
+
+    review_task = Task(
+        description=_review_description,
         agent=tone_grammar_reviewer,
         expected_output="Both revised letters labeled EN_FORMAL_FINAL: and EN_MODERN_FINAL:",
         context=[en_formal_task, en_modern_task, fact_check_task]
@@ -1054,7 +1373,9 @@ EN_MODERN_FINAL:
             review_task,        # 7  ← final output
         ],
         verbose=True,
-        step_callback=step_callback
+        # task_callback fires exactly once per completed task (8 total) — the
+        # step_callback CrewAI offers fires per agent *step* and overcounts.
+        task_callback=step_callback
     )
 
     return crew
@@ -1382,10 +1703,10 @@ def translate_letter(text: str, target_lang: str,
         f"- Keep all factual content and the same paragraph structure.\n"
         f"- Do NOT add or remove any information.\n"
         f"- Output ONLY the rewritten letter text, nothing else.\n\n"
-        f"LETTER TO REWRITE:\n{text}"
+        f"LETTER TO REWRITE:\n{text}{_no_think_suffix(llm_config)}"
     )
     result = llm.call([{"role": "user", "content": prompt}])
-    return result.strip() if isinstance(result, str) else str(result).strip()
+    return _strip_think(result if isinstance(result, str) else str(result))
 
 
 # ─────────────────────────────────────────────
@@ -1400,8 +1721,10 @@ def _compute_match_score(gap_raw: str) -> int:
     import re as _re
 
     def _count(header: str) -> int:
+        # \Z (not $): with (?m) active, $ matches every line end, which would
+        # cut each section down to its first line and skew the score.
         m = _re.search(
-            rf'(?m)^{header}:\s*\n(.*?)(?=\n[A-Z_]{{3,}}:|$)',
+            rf'(?m)^{header}:\s*\n(.*?)(?=\n[A-Z_]{{3,}}:|\Z)',
             gap_raw, _re.S
         )
         if not m:
@@ -1418,6 +1741,93 @@ def _compute_match_score(gap_raw: str) -> int:
     if total == 0:
         return 0
     return round((strong + 0.5 * partial) / total * 100)
+
+
+# ─────────────────────────────────────────────
+#  LETTER SANITATION + VALIDATION  (deterministic guard rails)
+# ─────────────────────────────────────────────
+#  Small local models drift: markdown fences, leftover labels, thinking blocks,
+#  missing sign-offs. These checks are cheap Python — catching problems here is
+#  far more reliable than asking a 7-8B model to police itself.
+
+_BANNED_PHRASES = [
+    "I am passionate about", "I am excited to", "I am writing to express",
+    "I believe I would be a great fit", "dynamic team", "aligns perfectly",
+    "align perfectly", "With extensive experience in", "further reinforces",
+    "unique blend", "I am confident that", "I look forward to contributing",
+    "diverse challenges", "logical next step", "I am well-suited",
+]
+
+
+def _sanitize_letter(text: str) -> str:
+    """Deterministically strip non-letter artifacts from model output."""
+    t = _strip_think(text or "")
+    t = re.sub(r'```[a-zA-Z]*', '', t).replace('```', '')
+    # leftover pipeline labels the model may echo
+    t = re.sub(r'(?im)^\s*EN_(FORMAL|MODERN)_(FINAL|DRAFT)\s*:\s*', '', t)
+    # markdown headers / bold markers
+    t = re.sub(r'(?m)^#{1,6}\s*', '', t)
+    t = t.replace('**', '')
+    return t.strip()
+
+
+def _validate_letter(text: str, candidate_name: str = "") -> list[str]:
+    """Return a list of concrete problems (empty list = letter is acceptable)."""
+    issues: list[str] = []
+    if not text or len(text.strip()) < 200:
+        issues.append("the letter is empty or far too short")
+        return issues
+    if not re.search(r'(?im)^dear\b', text):
+        issues.append('the salutation line (e.g. "Dear Hiring Manager,") is missing')
+    paragraphs = [p for p in re.split(r'\n\s*\n', text) if p.strip()]
+    if len(paragraphs) < 4:
+        issues.append(f"only {len(paragraphs)} paragraphs — a salutation, at least "
+                      "3-4 body paragraphs, and a sign-off are required")
+    if candidate_name and candidate_name.lower() not in text.lower():
+        issues.append(f'the sign-off must include the candidate name "{candidate_name}"')
+    found = [p for p in _BANNED_PHRASES if p.lower() in text.lower()]
+    if found:
+        issues.append("these banned filler phrases must be replaced with specific, "
+                      "concrete language: " + "; ".join(f'"{p}"' for p in found))
+    if "<think" in text.lower():
+        issues.append("internal reasoning text leaked into the letter — remove it")
+    return issues
+
+
+def _repair_letter(text: str, issues: list[str], llm: LLM, no_think: str = "") -> str:
+    """One targeted single-shot repair call — fix listed issues, change nothing else."""
+    issue_list = "\n".join(f"- {i}" for i in issues)
+    prompt = (
+        "Below is a cover letter with specific problems. Fix ONLY the listed problems. "
+        "Do not change any other wording, facts, or structure. "
+        "Output ONLY the corrected letter — no commentary, no markdown.\n\n"
+        f"PROBLEMS TO FIX:\n{issue_list}\n\n"
+        f"LETTER:\n{text}{no_think}"
+    )
+    try:
+        result = llm.call([{"role": "user", "content": prompt}])
+        return _sanitize_letter(result if isinstance(result, str) else str(result))
+    except Exception:
+        return ""
+
+
+def _finalize_letter(reviewed_text: str, writer_raw: str,
+                     candidate_name: str, llm: LLM, no_think: str = "") -> str:
+    """
+    Pick the best available letter: reviewer output → validated;
+    on validation failure make ONE repair attempt; keep whichever
+    version has the fewest remaining issues (reviewer > writer raw).
+    """
+    candidate = _sanitize_letter(reviewed_text) or _sanitize_letter(writer_raw)
+    if not candidate:
+        return ""
+    issues = _validate_letter(candidate, candidate_name)
+    if not issues:
+        return candidate
+    repaired = _repair_letter(candidate, issues, llm, no_think)
+    if repaired and len(_validate_letter(repaired, candidate_name)) < len(issues):
+        return repaired
+    return candidate
 
 
 # ─────────────────────────────────────────────
@@ -1439,7 +1849,10 @@ def quick_match_check(profile_text: str, job_raw: str,
     """
     import re as _re
 
-    llm = get_llm(llm_config)
+    # Structured extraction — low temperature is far more reliable on small models.
+    _analysis_config = {**llm_config, "temperature": 0.2} if llm_config else None
+    llm = get_llm(_analysis_config)
+    _nt = _no_think_suffix(llm_config)
 
     prompt = (
         "You will receive a job posting and a candidate profile.\n"
@@ -1455,12 +1868,12 @@ def quick_match_check(profile_text: str, job_raw: str,
         "GAP_1: <specific gap or missing requirement — one sentence>\n"
         "GAP_2: <specific gap or missing requirement — one sentence>\n"
         "GAP_3: <specific gap or missing requirement — one sentence>\n\n"
-        f"JOB POSTING:\n{job_raw[:3500]}\n\n"
-        f"CANDIDATE PROFILE:\n{profile_text[:2500]}"
+        f"JOB POSTING:\n{job_raw[:6000]}\n\n"
+        f"CANDIDATE PROFILE:\n{profile_text[:6000]}{_nt}"
     )
 
     raw = llm.call([{"role": "user", "content": prompt}])
-    raw = raw if isinstance(raw, str) else str(raw)
+    raw = _strip_think(raw if isinstance(raw, str) else str(raw))
 
     def _pick(key: str) -> str:
         m = _re.search(rf'(?m)^{key}:\s*(.+)$', raw)
@@ -1523,26 +1936,40 @@ def generate_cover_letters(
         docx_path            : Path | None
         profile_parsed       : dict — structured profile (for caching)
     """
+    # Writer LLM keeps the user's temperature; analysis tasks run at low
+    # temperature (structured output drifts badly at 0.7 on small models).
     llm = get_llm(llm_config)
+    _analysis_config = {**llm_config, "temperature": 0.2} if llm_config else None
+    analysis_llm = get_llm(_analysis_config) if llm_config else llm
+    _no_think    = _no_think_suffix(llm_config)
+    _small       = _is_small_local_model(llm_config)
+    # For Ollama, the single-shot extraction calls can use server-side JSON mode.
+    _is_ollama = bool(llm_config) and llm_config.get("backend") == "ollama"
+    json_llm   = get_llm(_analysis_config, json_mode=True) if _is_ollama else analysis_llm
+
     if pre_parsed_job is not None:
         job = {**pre_parsed_job}
         if not job.get("job_desc"):
             job["job_desc"] = job_raw
     else:
-        job = clean_job_paste(job_raw, llm, interactive=False)
+        job = clean_job_paste(job_raw, json_llm, interactive=False, no_think=_no_think)
 
     if company_override:
         job["company"] = company_override
 
     # Parse profile if not already cached
     if structured_profile is None:
-        structured_profile = parse_profile(profile_text, llm)
+        structured_profile = parse_profile(profile_text, json_llm, no_think=_no_think)
 
     _cname = candidate_name.strip() or (structured_profile.get("name") if "name" in structured_profile else "") or _extract_name_from_profile(profile_text)
+    resolved_industry = _resolve_industry(industry, job)
     crew = build_crew(job, llm, profile_text=profile_text, step_callback=step_callback,
                       candidate_name=_cname or "the candidate",
                       structured_profile=structured_profile,
-                      industry=industry)
+                      industry=resolved_industry,
+                      analysis_llm=analysis_llm,
+                      small_model=_small,
+                      no_think=_no_think)
     tasks_output = crew.kickoff()
     outputs = tasks_output.tasks_output
 
@@ -1550,17 +1977,19 @@ def generate_cover_letters(
     #                 6=fact_check, 7=review (final)
     #
     # Primary: parse the reviewer's combined output (task 7)
-    # Fallback: use the raw writer outputs (tasks 4-5) if reviewer parsing fails
+    # Fallback: raw writer outputs (tasks 4-5); each letter is then sanitized,
+    # validated, and — if needed — repaired with one targeted LLM call.
     reviewed = {}
     if len(outputs) > 7 and outputs[7].raw:
         reviewed = _parse_reviewer_output(outputs[7].raw)
 
-    def _pick(reviewed_text: str, writer_raw: str) -> str:
-        return reviewed_text.strip() if reviewed_text.strip() else writer_raw
-
     letters = [
-        _pick(reviewed.get("en_formal", ""), outputs[4].raw if len(outputs) > 4 else ""),
-        _pick(reviewed.get("en_modern", ""), outputs[5].raw if len(outputs) > 5 else ""),
+        _finalize_letter(reviewed.get("en_formal", ""),
+                         outputs[4].raw if len(outputs) > 4 else "",
+                         _cname, llm, _no_think),
+        _finalize_letter(reviewed.get("en_modern", ""),
+                         outputs[5].raw if len(outputs) > 5 else "",
+                         _cname, llm, _no_think),
     ]
 
     gap_raw     = outputs[2].raw if len(outputs) > 2 else ""
@@ -1586,6 +2015,7 @@ def generate_cover_letters(
         "docx_path":      docx_path,
         "profile_parsed": structured_profile,
         "match_score":    match_score,
+        "industry":       resolved_industry,
     }
 
 
@@ -1607,11 +2037,12 @@ def main():
     task_outputs = tasks_output.tasks_output
 
     reviewed = _parse_reviewer_output(task_outputs[7].raw) if len(task_outputs) > 7 else {}
-    def _pick(r, w):
-        return r.strip() if r.strip() else w
+    _cli_name = _extract_name_from_profile(CANDIDATE_PROFILE)
     letter_results = [
-        _pick(reviewed.get("en_formal", ""), task_outputs[4].raw if len(task_outputs) > 4 else ""),
-        _pick(reviewed.get("en_modern", ""), task_outputs[5].raw if len(task_outputs) > 5 else ""),
+        _finalize_letter(reviewed.get("en_formal", ""),
+                         task_outputs[4].raw if len(task_outputs) > 4 else "", _cli_name, llm),
+        _finalize_letter(reviewed.get("en_modern", ""),
+                         task_outputs[5].raw if len(task_outputs) > 5 else "", _cli_name, llm),
     ]
 
     output_dir = Path(__file__).parent / "output"

@@ -1,6 +1,6 @@
 # Cover Letter Crew
 
-*A sample project by [Afeef KALLANTHODAN](https://github.com/AfeefKallanthodan)*
+*A sample project exploring agentic AI with CrewAI.*
 
 ---
 
@@ -47,7 +47,7 @@ Open `.env` and fill in the key for your chosen provider. See `.env.example` for
 
 For the free local option, pull the default model instead:
 ```bash
-ollama pull qwen2.5:7b
+ollama pull qwen3.5:9b
 ```
 
 ### 3. Launch
@@ -268,10 +268,14 @@ The Streamlit sidebar lets you switch provider, pick a model, enter your API key
 
 | Model | VRAM | Notes |
 |---|---|---|
-| `qwen2.5:7b` (default) | ~6 GB | Best structured-output following |
+| `qwen3.5:9b` (default) | ~6 GB | Best instruction following; thinking mode auto-disabled by the app |
+| `qwen3:8b` | ~6 GB | Previous default — still excellent |
+| `qwen2.5:7b` | ~6 GB | Solid structured-output following |
 | `mistral:7b` | ~5 GB | Good English writing quality |
 | `llama3.2:3b` | ~3 GB | Fastest, lower quality |
-| `qwen2.5:14b` | ~10 GB | Better reasoning, fewer hallucinations |
+| `qwen3:14b` / `qwen2.5:14b` | ~10 GB | Better reasoning, fewer hallucinations |
+
+The app sets a 16k context window (`num_ctx`) for Ollama automatically — the Ollama default (~2–4k) would silently truncate the pipeline's long prompts. Because Ollama's OpenAI-compatible endpoint ignores per-request options, the app creates a lightweight derived model on first use (e.g. `qwen3.5:9b-ctx16384` — it shares the base weights, no extra disk). Override the size with `OLLAMA_NUM_CTX` in `.env` if you are RAM-constrained (`OLLAMA_NUM_CTX=0` disables the derived model).
 
 ---
 
@@ -308,7 +312,7 @@ GPU gives **10–30 tokens/sec** — pipeline runs in under 2 minutes, same as a
 ## File Structure
 
 ```
-afeef_crew/
+cover_letter_crew/
 ├── app.py                  # Streamlit web UI
 ├── cover_letter_crew.py    # All agents, tasks, and public generate_cover_letters() API
 ├── file_parser.py          # PDF / DOCX / TXT text extraction
@@ -371,7 +375,7 @@ results = generate_cover_letters(
     job_raw="... raw job posting ...",
     llm_config={
         "backend":     "ollama",
-        "model":       "qwen2.5:7b",
+        "model":       "qwen3.5:9b",
         "temperature": 0.7,
         "max_tokens":  1500,
     },
@@ -395,7 +399,33 @@ Small models work best when prompts are:
 If output quality is inconsistent:
 1. Lower temperature to `0.5` in the sidebar
 2. Reduce max tokens to `1000–1200`
-3. Switch to `qwen2.5:14b` or the DeepSeek API
+3. Switch to `qwen3:14b` or the DeepSeek API
+
+---
+
+## Diagnostics
+
+If anything misbehaves — especially with local AI — run the built-in step-by-step health check:
+
+**Windows (batch file — no venv activation needed):**
+```bat
+.\diagnose.bat               REM steps 1–12: unit tests + live Ollama/LLM checks (~2 min)
+.\diagnose.bat --offline     REM steps 1–3 only: no Ollama needed
+.\diagnose.bat --full        REM adds a real end-to-end 8-task pipeline run (slow!)
+.\diagnose.bat --model qwen3:8b
+.\diagnose.bat --url http://other-host:11434
+```
+
+**Mac / Linux / manual venv:**
+```bash
+python diagnose.py              # steps 1–12: unit tests + live Ollama/LLM checks (~2 min)
+python diagnose.py --offline    # steps 1–3 only: no Ollama needed
+python diagnose.py --full       # adds a real end-to-end 8-task pipeline run (slow!)
+python diagnose.py --model qwen3:8b
+python diagnose.py --url http://other-host:11434
+```
+
+Each numbered step prints `[PASS]` / `[FAIL]` with a hint, covering: environment & packages → project files → 41 unit tests (think-stripping, JSON extraction, match score, industry detection, letter validation, docx export, …) → Ollama server → model pulled → basic LLM call → context window actually applied → JSON mode → thinking-mode control → quick match → job parsing → profile parsing → (with `--full`) complete letter generation.
 
 ---
 
@@ -405,7 +435,7 @@ If output quality is inconsistent:
 |---|---|
 | `ModuleNotFoundError: crewai` | Activate the virtual environment first |
 | `Connection refused` (Ollama) | Run `ollama serve` in a separate terminal |
-| Model not found | Run `ollama pull qwen2.5:7b` |
+| Model not found | Run `ollama pull qwen3.5:9b` |
 | Empty letter body | Check API key is valid; try a larger model |
 | Slow generation | Switch to DeepSeek API (~$0.002) for 3× speed |
 | Out of memory | Use `llama3.2:3b` or reduce max tokens in sidebar |
@@ -434,6 +464,6 @@ Free to use, modify, and share. If you build something useful on top of this, a 
 
 ## About
 
-Built by **Afeef KALLANTHODAN** as a hands-on experiment in agentic AI.
+Built as a hands-on experiment in agentic AI.
 
 Stack: Python · [CrewAI](https://crewai.com) · [Streamlit](https://streamlit.io) · [LiteLLM](https://litellm.ai) · [Ollama](https://ollama.com)
