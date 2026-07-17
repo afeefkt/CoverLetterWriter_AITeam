@@ -8,6 +8,7 @@ import re
 import sys
 from pathlib import Path
 
+from datetime import date
 from dotenv import load_dotenv
 import streamlit as st
 
@@ -52,6 +53,7 @@ _DEFAULTS = {
     "trans_formal":      None,
     "trans_modern":      None,
     "trans_lang":        None,
+    "profile_editor":     "",
     "match_result":      None,
 }
 for _k, _v in _DEFAULTS.items():
@@ -165,8 +167,9 @@ def _llm_extract_name(profile_text: str, llm_config: dict) -> str:
         # Permissive: allows all-caps parts ("Afeef KT"), apostrophes, hyphens
         if re.match(r"^[A-ZÀ-Þ][a-zA-ZÀ-ÿ'’\-]*(\s[A-ZÀ-Þ][a-zA-ZÀ-ÿ'’\-]*){1,3}$", name):
             return name
-    except Exception:
-        pass
+    except Exception as e:
+        if os.environ.get("DEBUG"):
+            print(f"[DEBUG] LLM name extraction failed: {e}")
     return ""
 
 
@@ -188,8 +191,9 @@ def _llm_extract_company(job_raw: str, llm_config: dict) -> str:
         val = _strip_think(result).strip('"\'').strip()
         if val.lower() not in ('unknown', '', 'our client', 'unser kunde'):
             return val
-    except Exception:
-        pass
+    except Exception as e:
+        if os.environ.get("DEBUG"):
+            print(f"[DEBUG] LLM name extraction failed: {e}")
     return ""
 
 
@@ -1020,7 +1024,7 @@ if st.session_state.results:
             f"_{_sfn(st.session_state.candidate_name or 'Candidate')}"
             f"_{_sfn(job_meta.get('job_title','Position'))}"
             f"_{_sfn(job_meta.get('company','Company'))}"
-            f"_{__import__('datetime').date.today().strftime('%d%m%Y')}.docx"
+            f"_{date.today().strftime('%d%m%Y')}.docx"
         )
         _dl_bytes = build_docx_bytes(
             job_meta, _sel_variants,

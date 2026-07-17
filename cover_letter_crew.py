@@ -123,8 +123,9 @@ def _ensure_ctx_model(model: str, base_url: str = OLLAMA_BASE_URL) -> str:
             status = _json.loads(resp.read()).get("status", "")
         if status == "success" and _model_is_pulled(ctx_name, base_url):
             return ctx_name
-    except Exception:
-        pass
+    except Exception as e:
+        if os.environ.get("DEBUG"):
+            print(f"[DEBUG] _ensure_ctx_model failed: {e}")
     print(f"WARNING: could not create '{ctx_name}' — running with Ollama's "
           f"default context window; long prompts may be truncated.")
     return model
@@ -194,6 +195,7 @@ def _start_ollama(fatal: bool = True, base_url: str = OLLAMA_BASE_URL):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            start_new_session=(sys.platform != "win32"),
         )
     except FileNotFoundError:
         msg = "'ollama' command not found. Install Ollama from https://ollama.com and re-run."
@@ -608,16 +610,18 @@ CV text:
 
 def parse_profile(profile_text: str, llm: LLM, no_think: str = "") -> dict:
     """One LLM call → structured profile dict. Fallback: {"raw": profile_text}."""
-    import json as _json_mod
     try:
         raw = llm.call([{"role": "user",
-                         "content": _PARSE_PROFILE_PROMPT + profile_text[:8000] + no_think}])
+                         "content": _PARSE_PROFILE_PROMPT + profile_text[:8000] + "\n" + no_think}])
+        if raw is None:
+            return {"raw": profile_text}
         raw = _strip_think(raw if isinstance(raw, str) else str(raw))
         m = re.search(r'\{[\s\S]+\}', raw)
         if m:
-            return _json_mod.loads(m.group(0))
-    except Exception:
-        pass
+            return _json.loads(m.group(0))
+    except Exception as e:
+        if os.environ.get("DEBUG"):
+            print(f"[DEBUG] parse_profile failed: {e}")
     return {"raw": profile_text}
 
 
@@ -743,6 +747,9 @@ Common false equivalences to watch for (examples — not exhaustive):
   × motor/drive control ≠ engine or turbine design
   × avionics / DO-178C ≠ flight mechanics or aerodynamics
   × automotive embedded ≠ aerospace structures
+  × manned aircraft / fighter jets ≠ unmanned aerial systems (UAS) or drone development
+  × aerospace mechanical / systems engineering ≠ aerospace software or avionics development
+  × military aircraft geometry / hydraulics ≠ UAS software or flight control software
   × backend software ≠ frontend or DevOps
   × data analysis ≠ machine learning engineering
   × machine learning ≠ data engineering or MLOps
@@ -786,6 +793,7 @@ RULE 1 — EQUIVALENCE: adjacent experience is NOT direct expertise. Examples:
   × control systems ≠ propulsion · embedded software ≠ systems engineering
   × motor/drive control ≠ engine design · automotive embedded ≠ aerospace structures
   × simulation/modelling ≠ CFD/FEA · general programming ≠ safety-critical programming
+  × manned aircraft ≠ UAS/drones · aerospace systems eng ≠ avionics/flight software
   Adjacent = transferable foundation, NOT interchangeable.
 
 RULE 2 — JOB TITLES: only use a job title if it (or a close synonym) appears in the profile.
@@ -821,8 +829,8 @@ def build_crew(job: dict, llm: LLM, profile_text: str | None = None, step_callba
     no_think      : suffix appended to every task ("/no_think" for qwen3 via Ollama)
     """
     _profile = profile_text if profile_text is not None else CANDIDATE_PROFILE
-    _profile_block = _format_structured_profile(structured_profile) if structured_profile else _profile
-    _ref     = job['ref_number'] if job['ref_number'] else 'N/A'
+    _profile_block = _format_structured_profile(structured_profile) if structured_profile is not None else _profile
+    _ref     = job.get('ref_number') or 'N/A'
     industry = _resolve_industry(industry, job)
     _industry_ctx = _INDUSTRY_CONTEXT.get(industry, "")
     analysis_llm = analysis_llm or llm
@@ -897,11 +905,11 @@ def build_crew(job: dict, llm: LLM, profile_text: str | None = None, step_callba
         description=f"""
 Analyse this job description. Be concise.
 
-POSITION: {job['job_title']} at {job['company']}
-LOCATION: {job['location']}
+POSITION: {job.get('job_title', '')} at {job.get('company', '')}
+LOCATION: {job.get('location', '')}
 
 JOB DESCRIPTION:
-{job['job_desc']}
+{job.get('job_desc', '')}
 
 Output EXACTLY:
 
@@ -1005,7 +1013,15 @@ luft, raumfahrt, flight, defence, rüstung, aircraft — otherwise NO]
 If AEROSPACE_FLAG is YES, also output:
 DOMAIN_HIGHLIGHT: [The candidate's most relevant prior experience in aerospace, aviation, defence, or
 any safety-critical regulated domain — from the profile only. What they did, which standards or tools
-were involved, and how it connects to THIS job. Do not invent.]
+were involved, and how it connects to THIS job. Do not invent.
+IMPORTANT DISTINCTIONS — apply RULE 1 here:
+  - If the job targets UAS/drones/unmanned and the candidate's aerospace role was with MANNED aircraft
+    (fighter jets, combat aircraft, commercial aircraft, helicopters), state the gap explicitly.
+    Manned aircraft ≠ UAS. Put "UAS direct experience" in PROHIBITED_CLAIMS and provide SAFE_FRAMING
+    for the bridge instead (e.g. systems engineering principles, MATLAB/Simulink dynamic modelling).
+  - If the candidate's aerospace role was mechanical or systems engineering (geometry, hydraulics, ECS,
+    PLM tools) rather than software development, do NOT present it as aerospace software experience.
+    The candidate's software career begins at their first software-titled role — state this clearly.]
 {no_think}""",
         agent=skill_gap_mapper,
         expected_output="Truth-anchored skill map: STRONG_MATCHES, PARTIAL_MATCHES, PROHIBITED_CLAIMS, SAFE_FRAMING, OPENING_HOOK, UNIQUE_ANGLE, AEROSPACE_FLAG, DOMAIN_HIGHLIGHT (if aerospace)",
@@ -1222,6 +1238,15 @@ job title, or standard, evaluate:
        "exposure to" for single mentions; never stronger language than the evidence supports)
       If overclaiming strength → CALIBRATION issue
 
+  AEROSPACE/UAS RULE — applies when AEROSPACE_FLAG is YES in Task 2:
+  Any claim of "direct UAS experience", "unmanned systems experience", or "drone development"
+  is a HARD_VIOLATION unless the profile explicitly names a UAS or drone project.
+  Manned military aircraft roles (fighter jets, combat aircraft) are NOT UAS experience —
+  do not pass them as equivalent even under SOFT_VIOLATION.
+  If the candidate's aerospace role title was mechanical engineer or systems engineer (not software),
+  any claim that this role constitutes "aerospace software development" or "avionics software" is
+  a SOFT or HARD violation depending on how strongly it is stated.
+
 Output EXACTLY this format (no preamble, no commentary):
 
 EN_FORMAL_VIOLATIONS:
@@ -1372,7 +1397,7 @@ EN_MODERN_FINAL:
             fact_check_task,    # 6
             review_task,        # 7  ← final output
         ],
-        verbose=True,
+        verbose=False,
         # task_callback fires exactly once per completed task (8 total) — the
         # step_callback CrewAI offers fires per agent *step* and overcounts.
         task_callback=step_callback
@@ -1703,7 +1728,7 @@ def translate_letter(text: str, target_lang: str,
         f"- Keep all factual content and the same paragraph structure.\n"
         f"- Do NOT add or remove any information.\n"
         f"- Output ONLY the rewritten letter text, nothing else.\n\n"
-        f"LETTER TO REWRITE:\n{text}{_no_think_suffix(llm_config)}"
+        f"LETTER TO REWRITE:\n{text}\n{_no_think_suffix(llm_config)}"
     )
     result = llm.call([{"role": "user", "content": prompt}])
     return _strip_think(result if isinstance(result, str) else str(result))
@@ -1763,8 +1788,8 @@ def _sanitize_letter(text: str) -> str:
     """Deterministically strip non-letter artifacts from model output."""
     t = _strip_think(text or "")
     t = re.sub(r'```[a-zA-Z]*', '', t).replace('```', '')
-    # leftover pipeline labels the model may echo
-    t = re.sub(r'(?im)^\s*EN_(FORMAL|MODERN)_(FINAL|DRAFT)\s*:\s*', '', t)
+    # leftover pipeline labels the model may echo (handle brackets, spaces, variants)
+    t = re.sub(r'(?im)^\s*\[?\s*EN_?(FORMAL|MODERN)_?(FINAL|DRAFT)?\s*\]?\s*:?\s*', '', t)
     # markdown headers / bold markers
     t = re.sub(r'(?m)^#{1,6}\s*', '', t)
     t = t.replace('**', '')
@@ -1802,10 +1827,12 @@ def _repair_letter(text: str, issues: list[str], llm: LLM, no_think: str = "") -
         "Do not change any other wording, facts, or structure. "
         "Output ONLY the corrected letter — no commentary, no markdown.\n\n"
         f"PROBLEMS TO FIX:\n{issue_list}\n\n"
-        f"LETTER:\n{text}{no_think}"
+        f"LETTER:\n{text}\n{no_think}"
     )
     try:
         result = llm.call([{"role": "user", "content": prompt}])
+        if result is None:
+            return ""
         return _sanitize_letter(result if isinstance(result, str) else str(result))
     except Exception:
         return ""
@@ -1869,7 +1896,7 @@ def quick_match_check(profile_text: str, job_raw: str,
         "GAP_2: <specific gap or missing requirement — one sentence>\n"
         "GAP_3: <specific gap or missing requirement — one sentence>\n\n"
         f"JOB POSTING:\n{job_raw[:6000]}\n\n"
-        f"CANDIDATE PROFILE:\n{profile_text[:6000]}{_nt}"
+        f"CANDIDATE PROFILE:\n{profile_text[:6000]}\n{_nt}"
     )
 
     raw = llm.call([{"role": "user", "content": prompt}])

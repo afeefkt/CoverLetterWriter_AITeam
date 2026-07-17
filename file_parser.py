@@ -7,22 +7,49 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Union, BinaryIO
 
+MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _check_size(file, label: str = "file") -> None:
+    size = None
+    if hasattr(file, "seek") and hasattr(file, "tell"):
+        pos = file.tell()
+        file.seek(0, 2)
+        size = file.tell()
+        file.seek(pos)
+    elif hasattr(file, "size"):
+        size = file.size
+    if size is not None and size > MAX_FILE_BYTES:
+        raise ValueError(
+            f"{label} is {size / 1024 / 1024:.1f} MB — maximum is "
+            f"{MAX_FILE_BYTES / 1024 / 1024:.0f} MB."
+        )
+
 
 def extract_text_from_pdf(file) -> str:
+    _check_size(file, "PDF")
     from pypdf import PdfReader
-    reader = PdfReader(file)
-    pages = [page.extract_text() or "" for page in reader.pages]
-    return "\n\n".join(p.strip() for p in pages if p.strip())
+    try:
+        reader = PdfReader(file)
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n\n".join(p.strip() for p in pages if p.strip())
+    except Exception as e:
+        raise RuntimeError(f"Failed to read PDF: {e}")
 
 
 def extract_text_from_docx(file) -> str:
+    _check_size(file, "DOCX")
     from docx import Document
-    doc = Document(file)
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    return "\n".join(paragraphs)
+    try:
+        doc = Document(file)
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        return "\n".join(paragraphs)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read DOCX: {e}")
 
 
 def extract_text_from_txt(file) -> str:
+    _check_size(file, "TXT")
     if hasattr(file, "read"):
         raw_bytes = file.read()
         try:

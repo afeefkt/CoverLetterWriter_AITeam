@@ -66,6 +66,9 @@ Open `http://localhost:8501` in your browser.
 |---|---|
 | Resume upload | Upload PDF, DOCX, or TXT files — text is extracted automatically |
 | Raw job paste | Paste the full LinkedIn page — UI noise is stripped by an agent |
+| "Check Match" pre-check | Single-LLM-call pre-analysis — see fit % and gaps before running the full pipeline |
+| AI field detection | `Detect` buttons auto-extract candidate name from CV and company name from job posting |
+| Smart profile handling | Save profile as default (persists between sessions), auto-fill contact info from CV on upload |
 | 2 letter variants | EN Formal · EN Modern |
 | Fact Checker | Dedicated agent detects hallucinations before the reviewer applies fixes |
 | Match score | Circular gauge showing job ↔ profile fit % before you commit to applying |
@@ -73,13 +76,17 @@ Open `http://localhost:8501` in your browser.
 | Translation | One-click AI translation to German, French, Spanish, Italian + more (formal register aware) |
 | Word export | Checkbox-select which variants to include; filename: `CoverLetter_Name_Title_Company_Date.docx` |
 | LLM flexibility | Ollama (local/free) or any cloud API (7 providers); switch at runtime, no code changes |
+| Industry context | Dropdown selector (Aerospace, Automotive, Software, Finance, Healthcare, Generic) injects sector-relevant emphasis |
+| Temperature & tokens | Sidebar sliders for LLM generation parameters — tune quality vs speed at runtime |
+| Parsed profile summary | Post-generation expander shows structured CV breakdown (name, companies, skills, tools) |
+| Troubleshooting hints | On error, collapsible section with specific fix suggestions (model pull, API key, timeout, etc.) |
 | CLI mode | `python cover_letter_crew.py` still works unchanged |
 
 ---
 
 ## Multi-Agent Architecture & Workflow
 
-The system uses **7 AI agents** across **8 tasks** in a sequential pipeline. The key architectural principle is **detection → correction separation**: a dedicated Fact Checker finds hallucinations first; the Reviewer applies the fixes rather than trying to detect and fix simultaneously.
+The system uses **7 AI agents** across **8 tasks** in a sequential pipeline with two parallel stages. The key architectural principles are **(1) ATS keyword injection** — a dedicated optimiser builds a keyword checklist that writers must use — and **(2) detection → correction separation** — a dedicated Fact Checker finds hallucinations first; the Reviewer applies the fixes rather than trying to detect and fix simultaneously.
 
 ```mermaid
 flowchart TD
@@ -96,41 +103,54 @@ flowchart TD
     PARSER --> JOB[/"Structured Job Data\ncompany · title · location · ref · JD text"/]
 
     %% ── STAGE 1 ──────────────────────────────────────────────────
-    subgraph S1["🔍  Stage 1 — Job Analysis"]
+    subgraph S1["🔍  Stage 1 — Parallel Analysis  (2 agents run simultaneously)"]
+        direction LR
         JDA["🤖 Job Analyst\n\nReads the clean JD text\n\nOutputs labelled sections:\nTECHNICAL_REQUIREMENTS  (top 5)\nSOFT_SKILLS  (top 3)\nKEYWORDS  (comma-separated)\nTOOLS_AND_STANDARDS"]
+        RA["🤖 Resume Analyzer\n\nDeeply analyses the candidate's CV\n\nOutputs labelled sections:\nCORE_TECHNICAL_SKILLS\nDOMAIN_EXPERTISE\nEXPERIENCE_HIGHLIGHTS\nSTANDARDS_AND_CERTS\nLANGUAGE_SKILLS"]
     end
 
     JOB --> JDA
+    CV  --> RA
     JDA --> ANA[/"JD Analysis\n(structured labels for reliable 7B output)"/]
+    RA  --> RES[/"Resume Analysis\n(skills · domains · experience · certs)"/]
 
     %% ── STAGE 2 ──────────────────────────────────────────────────
     subgraph S2["🎯  Stage 2 — Profile Matching + Truth Anchor"]
-        MATCH["🤖 Profile Matcher\n\nReceives: JD Analysis + Candidate Profile\n\nOutputs labelled sections:\nSTRONG_MATCHES  (4 specific CV ↔ JD links)\nPARTIAL_MATCHES  (adjacent skills + safe framing)\nPROHIBITED_CLAIMS  (must NOT appear in letters)\nSAFE_FRAMING  (exact bridge sentences to use)\nOPENING_HOOK · UNIQUE_ANGLE · AEROSPACE_FLAG"]
+        MATCH["🤖 Skill Gap Mapper\n\nReceives: JD Analysis + Resume Analysis\n\nOutputs labelled sections:\nSTRONG_MATCHES  (4 specific CV ↔ JD links)\nPARTIAL_MATCHES  (adjacent skills + safe framing)\nPROHIBITED_CLAIMS  (must NOT appear in letters)\nSAFE_FRAMING  (exact bridge sentences to use)\nOPENING_HOOK · UNIQUE_ANGLE · AEROSPACE_FLAG"]
     end
 
     ANA --> MATCH
-    CV  --> MATCH
+    RES --> MATCH
     MATCH --> MA[/"Match Analysis + Truth Boundaries\n(shared context for writers and fact checker)"/]
 
     %% ── STAGE 3 ──────────────────────────────────────────────────
-    subgraph S3["✍️  Stage 3 — Writing (2 agents, both read Match Analysis)"]
+    subgraph S3["📊  Stage 3 — ATS Keyword Optimization"]
+        ATS["🤖 ATS Keyword Optimizer\n\nReceives: JD Analysis + Skill Gap Map\n\nOutputs labelled sections:\nMUST_USE_KEYWORDS  (comma-separated)\nKEYWORD_TALKING_POINTS\nATS_OPENING  (hook with keywords baked in)"]
+    end
+
+    MA --> ATS
+    ATS --> ATSO[/"ATS-Optimised Talking Points\n(keywords + talking points for writers)"/]
+
+    %% ── STAGE 4 ──────────────────────────────────────────────────
+    subgraph S4["✍️  Stage 4 — Writing (2 agents, both read Match + ATS Analysis)"]
         direction LR
         W1["🤖 Formal English Writer\n\nStructured · traditional\n4 paragraphs · flowing prose\nConnector words allowed\n\nSign-off:\nMit freundlichen Grüßen /\nKind regards, [Name]"]
         W2["🤖 Modern English Writer\n\nPunchy · direct\nOpens with strongest hook\nNo filler phrases · em-dashes\n\nSign-off:\nBest regards, [Name]"]
     end
 
-    MA --> W1 & W2
+    MA  --> W1 & W2
+    ATSO --> W1 & W2
 
-    %% ── STAGE 4 ──────────────────────────────────────────────────
-    subgraph S4["🔎  Stage 4 — Fact Checking (NEW)"]
+    %% ── STAGE 5 ──────────────────────────────────────────────────
+    subgraph S5["🔎  Stage 5 — Fact Checking"]
         FC["🤖 Fact Checker\n\nReceives: both letter drafts + Resume Analysis\n+ PROHIBITED_CLAIMS + SAFE_FRAMING\n\nGoes sentence-by-sentence — for every claim:\n  HARD violation → in PROHIBITED_CLAIMS, must remove\n  SOFT violation → adjacent overclaim, weaken\n  CALIBRATION   → language stronger than evidence\n  PASS           → verified against profile ✓\n\nOutputs structured VIOLATION REPORT only.\nDoes NOT rewrite letters."]
     end
 
     W1 & W2 --> FC
     FC --> VR[/"Violation Report\nEN_FORMAL_VIOLATIONS + EN_MODERN_VIOLATIONS\n+ SUMMARY counts"/]
 
-    %% ── STAGE 5 ──────────────────────────────────────────────────
-    subgraph S5["✅  Stage 5 — Review + Polish"]
+    %% ── STAGE 6 ──────────────────────────────────────────────────
+    subgraph S6["✅  Stage 6 — Review + Polish"]
         REV["🤖 Tone & Grammar Reviewer\n\nStep 1: Apply ALL violations from report (in order)\nStep 2: Fix salutation, language purity\nStep 3: Remove banned AI phrases\nStep 4: Grammar, technical terms\nStep 5: Paragraph depth (min 3 sentences each)\nStep 6: Sign-off completeness"]
     end
 
@@ -155,8 +175,8 @@ flowchart TD
     classDef output fill:#D6EAD6,color:#1a3a1a,stroke:#6a9a6a
     classDef input  fill:#FFF8E1,color:#333,stroke:#c9a
 
-    class PARSER,JDA,MATCH,W1,W2,FC,REV agent
-    class JOB,ANA,MA,VR,L1,L2 data
+    class PARSER,JDA,RA,MATCH,ATS,W1,W2,FC,REV agent
+    class JOB,ANA,RES,MA,ATSO,VR,L1,L2 data
     class TABS,DOCX output
     class RAW,CV input
 ```
@@ -172,14 +192,24 @@ flowchart TD
                           │
               [Structured Job Data: company, title, JD text]
                           │
-                     Job Analyst
+          ┌───────────────┴───────────────┐
+          ▼                               ▼
+     Job Analyst                    Resume Analyzer ◄── [Candidate Profile]
+          │                               │
+[Structured JD Analysis]      [Structured Resume Analysis]
+          │                               │
+          └───────────────┬───────────────┘
+                          ▼
+                   Skill Gap Mapper
                           │
-         [JD Analysis: requirements, skills, keywords]
+          [Match Analysis: STRONG_MATCHES, PROHIBITED_CLAIMS, SAFE_FRAMING]
                           │
-                   Profile Matcher ◄─── [Candidate Profile]
+                    ATS Optimizer
+                          │
+               [ATS Keywords + Talking Points]
                           │
           ┌───────────────┘
-          │   PROHIBITED_CLAIMS + SAFE_FRAMING + STRONG_MATCHES
+          │   JD Analysis + Match + ATS context
           ▼               ▼
     EN Formal Writer   EN Modern Writer
           │               │
@@ -197,7 +227,9 @@ flowchart TD
     EN_FORMAL_FINAL    EN_MODERN_FINAL
 ```
 
-The **Fact Checker** is the key architectural addition. It receives the two draft letters and the truth boundaries (PROHIBITED_CLAIMS, SAFE_FRAMING) produced by the Profile Matcher, then produces a structured violation report. The **Reviewer** receives this report and applies every fix before doing grammar and style work — detection and correction are fully separated.
+The **Fact Checker** is the key architectural addition. It receives the two draft letters and the truth boundaries (PROHIBITED_CLAIMS, SAFE_FRAMING) produced by the Skill Gap Mapper, then produces a structured violation report. The **Reviewer** receives this report and applies every fix before doing grammar and style work — detection and correction are fully separated.
+
+Each stage passes forward only the data the next stage needs (structured labels, not raw text), keeping the context window manageable and preventing cross-contamination. The **ATS Optimizer** (Stage 3) adds a keyword-injection layer between matching and writing — writers receive an explicit keyword checklist, improving ATS score without requiring agents to independently re-derive keywords from the raw JD.
 
 ---
 
@@ -206,11 +238,14 @@ The **Fact Checker** is the key architectural addition. It receives the two draf
 ### Stage 0 — Job Page Parser
 A lightweight mini-crew that runs **before** the main pipeline. LinkedIn pages contain buttons, nav bars, premium upsells, "People you may know" sections, share/save prompts, etc. This agent strips all of that and returns a clean JSON object with only the actual job content.
 
-### Stage 1 — Job Analyst
-Reads the clean job description and produces a structured breakdown using **labelled sections** (`TECHNICAL_REQUIREMENTS:`, `SOFT_SKILLS:`, etc.). The explicit format is enforced so that even a 7B local model produces reliable, parseable output.
+### Stage 1 — Parallel Analysis (2 agents run simultaneously)
 
-### Stage 2 — Profile Matcher + Truth Anchor
-Receives both the JD Analysis and the full candidate profile. It produces:
+**Job Analyst** — reads the clean job description and produces a structured breakdown using **labelled sections** (`TECHNICAL_REQUIREMENTS:`, `SOFT_SKILLS:`, etc.). The explicit format is enforced so that even a 7B local model produces reliable, parseable output.
+
+**Resume Analyzer** — deeply analyses the candidate's CV and produces a structured skills and experience breakdown: `CORE_TECHNICAL_SKILLS`, `DOMAIN_EXPERTISE`, `EXPERIENCE_HIGHLIGHTS`, `STANDARDS_AND_CERTS`, `LANGUAGE_SKILLS`. These two agents run in parallel (they have no shared context dependency), cutting pipeline time.
+
+### Stage 2 — Skill Gap Mapper + Truth Anchor
+Receives both the JD Analysis and the Resume Analysis. It produces:
 - **STRONG_MATCHES** — specific one-to-one links between CV experience and JD requirements
 - **PARTIAL_MATCHES** — adjacent skills with exact safe framing sentences to use
 - **PROHIBITED_CLAIMS** — skills, tools, and job titles the JD requires that have NO direct evidence in the profile; writers must not claim these at all
@@ -219,10 +254,13 @@ Receives both the JD Analysis and the full candidate profile. It produces:
 
 The truth boundaries are enforced by the writers (TRUTH CONSTRAINT rule), verified by the Fact Checker, and applied by the Reviewer — three layers.
 
-### Stage 3 — 2 Writing Agents
-Each writer receives the Match Analysis and generates a complete letter body in their assigned style. They are constrained to use only SAFE_FRAMING for gap areas and must not claim anything under PROHIBITED_CLAIMS.
+### Stage 3 — ATS Keyword Optimizer
+Receives the JD Analysis and the Skill Gap Map, then produces ATS-optimised talking points: `MUST_USE_KEYWORDS` (comma-separated list), `KEYWORD_TALKING_POINTS` (natural-language sentences embedding the keywords), and `ATS_OPENING` (hook sentence with keywords baked in). Writers use these as a mandatory keyword checklist.
 
-### Stage 4 — Fact Checker (NEW)
+### Stage 4 — 2 Writing Agents (run in parallel)
+Each writer receives the Match Analysis and the ATS talking points, then generates a complete letter body in their assigned style. They are constrained to use only SAFE_FRAMING for gap areas, must not claim anything under PROHIBITED_CLAIMS, and must weave in the ATS keywords naturally.
+
+### Stage 5 — Fact Checker
 Goes sentence-by-sentence through both draft letters. For every claim about a skill, tool, domain, or job title, it checks:
 - **Q1**: Is this directly evidenced in the candidate profile?
 - **Q2**: If not — is it in PROHIBITED_CLAIMS? → **HARD violation**
@@ -231,7 +269,7 @@ Goes sentence-by-sentence through both draft letters. For every claim about a sk
 
 Outputs a structured **VIOLATION REPORT** with the exact phrase, reason, and replacement for each issue. Does **not** rewrite letters.
 
-### Stage 5 — Reviewer
+### Stage 6 — Reviewer
 Receives the two drafts and the violation report. Applies every HARD, SOFT, and CALIBRATION fix first (in order), then handles grammar, banned phrases, paragraph depth, and sign-off completeness.
 
 ---
@@ -317,9 +355,12 @@ cover_letter_crew/
 ├── cover_letter_crew.py    # All agents, tasks, and public generate_cover_letters() API
 ├── file_parser.py          # PDF / DOCX / TXT text extraction
 ├── profile.py              # Default candidate profile (pre-loads in UI)
+├── diagnose.py             # Step-by-step health check (unit tests + live LLM checks)
 ├── requirements.txt        # Python dependencies
 ├── Run_Streamlit.bat       # Windows double-click launcher (Streamlit)
 ├── Run.bat                 # Windows double-click launcher (CLI)
+├── Run.sh                  # Mac/Linux launcher (CLI)
+├── diagnose.bat            # Windows diagnostic runner
 ├── .env                    # API keys — never commit this
 ├── .env.example            # Template for .env
 └── output/                 # Generated .docx files
@@ -340,11 +381,20 @@ clean_job_paste(raw, llm, interactive=True)
 parse_profile(profile_text, llm)
 # → structured dict: name, companies, skills, tools, education, languages
 
+quick_match_check(profile_text, job_desc, llm)
+# → single-LLM-call pre-analysis: match_verdict, strengths, gaps, match_score
+
+translate_letter(letter_text, target_lang, llm_config, original_job_title, company_name)
+# → translated letter text with language-specific register rules
+
 get_llm(llm_config)
 # → LLM instance (Ollama, DeepSeek, Anthropic, OpenAI, Gemini, Groq, OpenRouter)
 
 save_to_docx(job, results, output_dir, candidate_name, ...)
 # → Path to saved .docx file (2 variants)
+
+build_docx_bytes(results, job)
+# → In-memory .docx bytes for streamlit.download_button
 ```
 
 ---
