@@ -10,14 +10,14 @@ The idea was simple: can I build something genuinely useful using multiple AI ag
 
 Two scenarios drove the design:
 
-- 🔒 **Local AI (privacy-first)** — runs entirely on your laptop using [Ollama](https://ollama.com). No data leaves your machine. Completely free. Good enough for most use cases.
-- ☁️ **Cloud APIs (maximum quality)** — swap to DeepSeek, Claude, GPT-4o, Gemini, or Groq at runtime for noticeably better output. Optional.
+- 🔒 **Local AI (privacy-first)** — runs entirely on your laptop using [Ollama](https://ollama.com). No data leaves your machine. Completely free. Uses a lightweight 5-call pipeline optimised for 7B models.
+- ☁️ **Cloud APIs (maximum quality)** — swap to DeepSeek, Claude, GPT-4o, Gemini, or Groq at runtime for noticeably better output. Uses full CrewAI pipeline. Optional.
 
-Built with **[CrewAI](https://crewai.com)** — a Python framework for orchestrating multi-agent AI pipelines. Each agent has one narrow job; they pass structured context to each other rather than trying to do everything in one giant prompt.
+Built with **[CrewAI](https://crewai.com)** — a Python framework for orchestrating multi-agent AI pipelines — for the cloud path. The local path uses direct Ollama API calls with no CrewAI or LiteLLM dependency.
 
 > **This is a learning project.** It works well enough to produce real, usable cover letters — but expect rough edges, and always review the output before sending anything. Feedback and pull requests welcome.
 
-What it does in practice: paste a job posting + upload your CV → 7 AI agents collaborate across 8 tasks → 2 polished, fact-checked cover letters in ~2 minutes, with an optional German (or multi-language) translation step.
+What it does in practice: paste a job posting + upload your CV → a polished, fact-checked formal cover letter in ~2–4 minutes (local) or ~1 minute (cloud), with optional multi-language translation.
 
 ---
 
@@ -69,12 +69,11 @@ Open `http://localhost:8501` in your browser.
 | "Check Match" pre-check | Single-LLM-call pre-analysis — see fit % and gaps before running the full pipeline |
 | AI field detection | `Detect` buttons auto-extract candidate name from CV and company name from job posting |
 | Smart profile handling | Save profile as default (persists between sessions), auto-fill contact info from CV on upload |
-| 2 letter variants | EN Formal · EN Modern |
 | Fact Checker | Dedicated agent detects hallucinations before the reviewer applies fixes |
 | Match score | Circular gauge showing job ↔ profile fit % before you commit to applying |
-| Copy-ready output | Each letter in a code block — select all, Ctrl+C, done |
+| Copy-ready output | Letter in a code block — select all, Ctrl+C, done |
 | Translation | One-click AI translation to German, French, Spanish, Italian + more (formal register aware) |
-| Word export | Checkbox-select which variants to include; filename: `CoverLetter_Name_Title_Company_Date.docx` |
+| Word export | Download as formatted .docx; filename: `CoverLetter_Name_Title_Company_Date.docx` |
 | LLM flexibility | Ollama (local/free) or any cloud API (7 providers); switch at runtime, no code changes |
 | Industry context | Dropdown selector (Aerospace, Automotive, Software, Finance, Healthcare, Generic) injects sector-relevant emphasis |
 | Temperature & tokens | Sidebar sliders for LLM generation parameters — tune quality vs speed at runtime |
@@ -84,9 +83,35 @@ Open `http://localhost:8501` in your browser.
 
 ---
 
-## Multi-Agent Architecture & Workflow
+## Architecture: Two Pipelines, One Interface
 
-The system uses **7 AI agents** across **8 tasks** in a sequential pipeline with two parallel stages. The key architectural principles are **(1) ATS keyword injection** — a dedicated optimiser builds a keyword checklist that writers must use — and **(2) detection → correction separation** — a dedicated Fact Checker finds hallucinations first; the Reviewer applies the fixes rather than trying to detect and fix simultaneously.
+The system automatically picks the right pipeline based on the model:
+
+```
+generate_cover_letters()
+    │
+    ├── Ollama + model ≤ 9B ?
+    │   YES → _run_local_pipeline()     5 direct ollama.chat() calls, no CrewAI
+    │
+    └── Cloud/SaaS or 14B+ ?
+        NO  → _run_crew_pipeline()      CrewAI pipeline (formal-only)
+```
+
+Both paths return the same output format. The local pipeline trades CrewAI orchestration overhead and redundant LLM calls for faster, more reliable output on small models.
+
+### Local Pipeline (7B models, 5 calls)
+
+| # | Stage | What it does |
+|---|-------|---------------|
+| 1 | Parse Job | Extract structured JSON from raw LinkedIn paste (company, title, location, description) |
+| 2 | Parse Profile | Extract structured CV data (skills, companies, achievements, education) |
+| 3 | Analyze & Match | Compare JD to CV → STRONG_MATCHES, KEYWORDS, PROHIBITED_CLAIMS, SAFE_FRAMING, OPENING_HOOK |
+| 4 | Write Letter | Generate formal letter using all analysis context + strict 4-paragraph structure |
+| 5 | Polish & Verify | Fact-check every claim, remove banned phrases, fix grammar, enforce sign-off |
+
+Each call uses a single-focus prompt under 1200 chars — the format 7B models follow best. Deterministic Python guard rails (`_sanitize_letter`, `_validate_letter`, `_repair_letter`) catch any remaining drift.
+
+### Cloud Pipeline (CrewAI, 7 tasks)
 
 ```mermaid
 flowchart TD
@@ -96,78 +121,70 @@ flowchart TD
 
     %% ── STAGE 0 ──────────────────────────────────────────────────
     subgraph S0["⚙️  Stage 0 — Pre-processing  (mini-crew, runs first)"]
-        PARSER["🤖 Job Page Parser\n\nStrips: buttons, nav bars, share prompts,\npremium upsells, 'People you may know'\n\nExtracts structured JSON:\n• company_name\n• job_title\n• location\n• ref_number\n• job_description  ← clean text only"]
+        PARSER["🤖 Job Page Parser\n\nStrips: buttons, nav bars, share prompts,\npremium upsells, 'People you may know'\n\nExtracts structured JSON"]
     end
 
     RAW --> PARSER
-    PARSER --> JOB[/"Structured Job Data\ncompany · title · location · ref · JD text"/]
+    PARSER --> JOB[/"Structured Job Data"/]
 
     %% ── STAGE 1 ──────────────────────────────────────────────────
     subgraph S1["🔍  Stage 1 — Parallel Analysis  (2 agents run simultaneously)"]
         direction LR
-        JDA["🤖 Job Analyst\n\nReads the clean JD text\n\nOutputs labelled sections:\nTECHNICAL_REQUIREMENTS  (top 5)\nSOFT_SKILLS  (top 3)\nKEYWORDS  (comma-separated)\nTOOLS_AND_STANDARDS"]
-        RA["🤖 Resume Analyzer\n\nDeeply analyses the candidate's CV\n\nOutputs labelled sections:\nCORE_TECHNICAL_SKILLS\nDOMAIN_EXPERTISE\nEXPERIENCE_HIGHLIGHTS\nSTANDARDS_AND_CERTS\nLANGUAGE_SKILLS"]
+        JDA["🤖 Job Analyst\n\nReads the clean JD text\n\nOutputs labelled sections:\nTECHNICAL_REQUIREMENTS\nSOFT_SKILLS\nKEYWORDS\nTOOLS_AND_STANDARDS"]
+        RA["🤖 Resume Analyzer\n\nDeeply analyses the candidate's CV\n\nOutputs labelled sections:\nCORE_TECHNICAL_SKILLS\nDOMAIN_EXPERTISE\nEXPERIENCE_HIGHLIGHTS"]
     end
 
     JOB --> JDA
     CV  --> RA
-    JDA --> ANA[/"JD Analysis\n(structured labels for reliable 7B output)"/]
-    RA  --> RES[/"Resume Analysis\n(skills · domains · experience · certs)"/]
 
     %% ── STAGE 2 ──────────────────────────────────────────────────
     subgraph S2["🎯  Stage 2 — Profile Matching + Truth Anchor"]
-        MATCH["🤖 Skill Gap Mapper\n\nReceives: JD Analysis + Resume Analysis\n\nOutputs labelled sections:\nSTRONG_MATCHES  (4 specific CV ↔ JD links)\nPARTIAL_MATCHES  (adjacent skills + safe framing)\nPROHIBITED_CLAIMS  (must NOT appear in letters)\nSAFE_FRAMING  (exact bridge sentences to use)\nOPENING_HOOK · UNIQUE_ANGLE · AEROSPACE_FLAG"]
+        MATCH["🤖 Skill Gap Mapper\n\nReceives: JD Analysis + Resume Analysis\n\nOutputs: STRONG_MATCHES, PARTIAL_MATCHES,\nPROHIBITED_CLAIMS, SAFE_FRAMING,\nOPENING_HOOK, UNIQUE_ANGLE"]
     end
 
-    ANA --> MATCH
-    RES --> MATCH
-    MATCH --> MA[/"Match Analysis + Truth Boundaries\n(shared context for writers and fact checker)"/]
+    JDA --> MATCH
+    RA  --> MATCH
+    MATCH --> MA[/"Match Analysis + Truth Boundaries"/]
 
     %% ── STAGE 3 ──────────────────────────────────────────────────
     subgraph S3["📊  Stage 3 — ATS Keyword Optimization"]
-        ATS["🤖 ATS Keyword Optimizer\n\nReceives: JD Analysis + Skill Gap Map\n\nOutputs labelled sections:\nMUST_USE_KEYWORDS  (comma-separated)\nKEYWORD_TALKING_POINTS\nATS_OPENING  (hook with keywords baked in)"]
+        ATS["🤖 ATS Keyword Optimizer\n\nReceives: JD Analysis + Skill Gap Map\n\nOutputs: MUST_USE_KEYWORDS,\nKEYWORD_TALKING_POINTS, ATS_OPENING"]
     end
 
     MA --> ATS
-    ATS --> ATSO[/"ATS-Optimised Talking Points\n(keywords + talking points for writers)"/]
+    ATS --> ATSO[/"ATS-Optimised Talking Points"/]
 
-    %% ── STAGE 4 ──────────────────────────────────────────────────
-    subgraph S4["✍️  Stage 4 — Writing (2 agents, both read Match + ATS Analysis)"]
-        direction LR
-        W1["🤖 Formal English Writer\n\nStructured · traditional\n4 paragraphs · flowing prose\nConnector words allowed\n\nSign-off:\nMit freundlichen Grüßen /\nKind regards, [Name]"]
-        W2["🤖 Modern English Writer\n\nPunchy · direct\nOpens with strongest hook\nNo filler phrases · em-dashes\n\nSign-off:\nBest regards, [Name]"]
+    %% ── STAGE 4 ────────────────────────────────────────────────────
+    subgraph S4["✍️  Stage 4 — Writing"]
+        W1["🤖 Formal English Writer\n\nStructured · traditional\n4 paragraphs · flowing prose\n\nSign-off:\nMit freundlichen Grüßen /\nKind regards, [Name]"]
     end
 
-    MA  --> W1 & W2
-    ATSO --> W1 & W2
+    MA   --> W1
+    ATSO --> W1
 
     %% ── STAGE 5 ──────────────────────────────────────────────────
     subgraph S5["🔎  Stage 5 — Fact Checking"]
-        FC["🤖 Fact Checker\n\nReceives: both letter drafts + Resume Analysis\n+ PROHIBITED_CLAIMS + SAFE_FRAMING\n\nGoes sentence-by-sentence — for every claim:\n  HARD violation → in PROHIBITED_CLAIMS, must remove\n  SOFT violation → adjacent overclaim, weaken\n  CALIBRATION   → language stronger than evidence\n  PASS           → verified against profile ✓\n\nOutputs structured VIOLATION REPORT only.\nDoes NOT rewrite letters."]
+        FC["🤖 Fact Checker\n\nReceives: draft letter + Resume Analysis\n+ PROHIBITED_CLAIMS + SAFE_FRAMING\n\nSentence-by-sentence verification:\n  HARD violation → in PROHIBITED_CLAIMS\n  SOFT violation → adjacent overclaim\n  CALIBRATION → language stronger than evidence\n\nOutputs structured VIOLATION REPORT"]
     end
 
-    W1 & W2 --> FC
-    FC --> VR[/"Violation Report\nEN_FORMAL_VIOLATIONS + EN_MODERN_VIOLATIONS\n+ SUMMARY counts"/]
+    W1 --> FC
+    FC --> VR[/"Violation Report\nwith HARD/SOFT/CALIBRATION sections"/]
 
     %% ── STAGE 6 ──────────────────────────────────────────────────
     subgraph S6["✅  Stage 6 — Review + Polish"]
-        REV["🤖 Tone & Grammar Reviewer\n\nStep 1: Apply ALL violations from report (in order)\nStep 2: Fix salutation, language purity\nStep 3: Remove banned AI phrases\nStep 4: Grammar, technical terms\nStep 5: Paragraph depth (min 3 sentences each)\nStep 6: Sign-off completeness"]
+        REV["🤖 Tone & Grammar Reviewer\n\nApplies ALL violations from report\nFixes salutation, language, grammar\nRemoves banned AI phrases\nEnsures paragraph depth\nValidates sign-off"]
     end
 
     VR --> REV
-    W1 & W2 --> REV
+    W1 --> REV
+    REV --> L1["EN Formal Letter"]
 
-    %% ── OUTPUTS ──────────────────────────────────────────────────
-    REV --> L1["EN Formal"]
-    REV --> L2["EN Modern"]
-
+    %% ── OUTPUT ───────────────────────────────────────────────────
     subgraph OUT["📤  Output — Streamlit UI"]
-        TABS["2 Tabs — one per variant\nEach letter in a copyable code block\n(click · Ctrl+A · Ctrl+C)"]
-        DOCX["Optional: Download .docx\nBoth variants in a formatted Word file"]
+        DISPLAY["Copyable code block\n+ Download .docx"]
     end
 
-    L1 & L2 --> TABS
-    TABS --> DOCX
+    L1 --> DISPLAY
 
     %% ── STYLES ───────────────────────────────────────────────────
     classDef agent  fill:#1F497D,color:#fff,stroke:#0d2d52
@@ -175,9 +192,9 @@ flowchart TD
     classDef output fill:#D6EAD6,color:#1a3a1a,stroke:#6a9a6a
     classDef input  fill:#FFF8E1,color:#333,stroke:#c9a
 
-    class PARSER,JDA,RA,MATCH,ATS,W1,W2,FC,REV agent
-    class JOB,ANA,RES,MA,ATSO,VR,L1,L2 data
-    class TABS,DOCX output
+    class PARSER,JDA,RA,MATCH,ATS,W1,FC,REV agent
+    class JOB,MA,ATSO,VR,L1 data
+    class DISPLAY output
     class RAW,CV input
 ```
 
@@ -208,32 +225,28 @@ flowchart TD
                           │
                [ATS Keywords + Talking Points]
                           │
-          ┌───────────────┘
-          │   JD Analysis + Match + ATS context
-          ▼               ▼
-    EN Formal Writer   EN Modern Writer
-          │               │
-          └───────┬───────┘
-                  ▼
-            Fact Checker  ◄── PROHIBITED_CLAIMS, SAFE_FRAMING, Resume Analysis
-                  │
-          [Violation Report: HARD / SOFT / CALIBRATION per letter]
-                  │
-              Reviewer ◄── both draft letters
-                  │
-          [Apply fixes → polish → output]
-                  │
-          ┌───────┴───────┐
-    EN_FORMAL_FINAL    EN_MODERN_FINAL
+                          ▼
+                EN Formal Writer
+                          │
+                          ▼
+                    Fact Checker  ◄── PROHIBITED_CLAIMS, SAFE_FRAMING, Resume Analysis
+                          │
+              [Violation Report: HARD / SOFT / CALIBRATION]
+                          │
+                      Reviewer ◄── draft letter
+                          │
+              [Apply fixes → polish → output]
+                          │
+                    EN_FORMAL_FINAL
 ```
 
-The **Fact Checker** is the key architectural addition. It receives the two draft letters and the truth boundaries (PROHIBITED_CLAIMS, SAFE_FRAMING) produced by the Skill Gap Mapper, then produces a structured violation report. The **Reviewer** receives this report and applies every fix before doing grammar and style work — detection and correction are fully separated.
+The **Fact Checker** is the key architectural addition. It receives the draft letter and the truth boundaries (PROHIBITED_CLAIMS, SAFE_FRAMING) produced by the Skill Gap Mapper, then produces a structured violation report. The **Reviewer** receives this report and applies every fix before doing grammar and style work — detection and correction are fully separated.
 
-Each stage passes forward only the data the next stage needs (structured labels, not raw text), keeping the context window manageable and preventing cross-contamination. The **ATS Optimizer** (Stage 3) adds a keyword-injection layer between matching and writing — writers receive an explicit keyword checklist, improving ATS score without requiring agents to independently re-derive keywords from the raw JD.
+Each stage passes forward only the data the next stage needs (structured labels, not raw text), keeping the context window manageable and preventing cross-contamination.
 
 ---
 
-## Stage-by-Stage Breakdown
+## Stage-by-Stage Breakdown (Cloud Pipeline)
 
 ### Stage 0 — Job Page Parser
 A lightweight mini-crew that runs **before** the main pipeline. LinkedIn pages contain buttons, nav bars, premium upsells, "People you may know" sections, share/save prompts, etc. This agent strips all of that and returns a clean JSON object with only the actual job content.
@@ -257,11 +270,11 @@ The truth boundaries are enforced by the writers (TRUTH CONSTRAINT rule), verifi
 ### Stage 3 — ATS Keyword Optimizer
 Receives the JD Analysis and the Skill Gap Map, then produces ATS-optimised talking points: `MUST_USE_KEYWORDS` (comma-separated list), `KEYWORD_TALKING_POINTS` (natural-language sentences embedding the keywords), and `ATS_OPENING` (hook sentence with keywords baked in). Writers use these as a mandatory keyword checklist.
 
-### Stage 4 — 2 Writing Agents (run in parallel)
-Each writer receives the Match Analysis and the ATS talking points, then generates a complete letter body in their assigned style. They are constrained to use only SAFE_FRAMING for gap areas, must not claim anything under PROHIBITED_CLAIMS, and must weave in the ATS keywords naturally.
+### Stage 4 — EN Formal Writer
+Receives the Match Analysis and the ATS talking points, then generates a complete letter body. Constrained to use only SAFE_FRAMING for gap areas, must not claim anything under PROHIBITED_CLAIMS, and must weave in the ATS keywords naturally.
 
 ### Stage 5 — Fact Checker
-Goes sentence-by-sentence through both draft letters. For every claim about a skill, tool, domain, or job title, it checks:
+Goes sentence-by-sentence through the draft letter. For every claim about a skill, tool, domain, or job title, it checks:
 - **Q1**: Is this directly evidenced in the candidate profile?
 - **Q2**: If not — is it in PROHIBITED_CLAIMS? → **HARD violation**
 - **Q3**: Is it an adjacent domain overclaim without using SAFE_FRAMING? → **SOFT violation**
@@ -270,11 +283,52 @@ Goes sentence-by-sentence through both draft letters. For every claim about a sk
 Outputs a structured **VIOLATION REPORT** with the exact phrase, reason, and replacement for each issue. Does **not** rewrite letters.
 
 ### Stage 6 — Reviewer
-Receives the two drafts and the violation report. Applies every HARD, SOFT, and CALIBRATION fix first (in order), then handles grammar, banned phrases, paragraph depth, and sign-off completeness.
+Receives the draft and the violation report. Applies every HARD, SOFT, and CALIBRATION fix first (in order), then handles grammar, banned phrases, paragraph depth, and sign-off completeness.
 
 ---
 
-## Why Separate Detection from Correction?
+## Local Pipeline (7B Models, 5 Calls)
+
+When a local Ollama model ≤ 9B is detected, the system switches to a lightweight pipeline with zero CrewAI or LiteLLM dependency at runtime. Each stage uses a single-focus prompt under 1200 characters — optimal for 7B instruction-following.
+
+### Stage 1 — Parse Job
+Direct `ollama.chat()` call with `json_mode=True`. Same extraction logic as the Job Page Parser, but called via `requests` instead of CrewAI.
+
+### Stage 2 — Parse Profile
+Direct call to extract structured CV data (name, companies, skills, tools, education, languages). Cached in Streamlit session state to avoid re-parsing.
+
+### Stage 3 — Analyze & Match
+Single call combining JD analysis, skill gap mapping, and keyword extraction. Outputs the same labelled sections as the cloud pipeline's Stages 1–3 combined: `STRONG_MATCHES`, `PROHIBITED_CLAIMS`, `SAFE_FRAMING`, `KEYWORDS`, `OPENING_HOOK`, `UNIQUE_ANGLE`.
+
+### Stage 4 — Write Letter
+Generates the formal letter using all analysis context from Stage 3. Follows the same 4-paragraph mandatory structure and truth constraints as the cloud pipeline.
+
+### Stage 5 — Polish & Verify
+Applies fact-check corrections, removes banned AI phrases, fixes grammar, enforces sign-off, and ensures paragraph depth. Equivalent to the cloud pipeline's Stages 5–6 combined.
+
+After Stage 5, deterministic Python guard rails (`_sanitize_letter`, `_validate_letter`, `_repair_letter`) catch any remaining drift — these are the same functions used by both pipelines.
+
+---
+
+## Why Two Pipelines?
+
+| Aspect | Cloud Pipeline (CrewAI) | Local Pipeline (Direct) |
+|---|---|---|
+| LLM calls | 8 | 5 |
+| Orchestration | CrewAI + LiteLLM | `requests` to Ollama API |
+| Dependencies at runtime | crewai, litellm, google-genai | requests only |
+| Prompt complexity | Multi-constraint, 1500–2000 chars | Single-focus, 500–1200 chars |
+| Detection → Correction | Separate Fact Checker + Reviewer | Combined Polish & Verify |
+| Best for | Cloud models (GPT-4o, Claude, DeepSeek) | Local 7B models (qwen3.5, llama3.1) |
+| Time (7B model) | 8–15 min | 2–4 min |
+
+The cloud pipeline was designed for models that can reliably follow 1800-char prompts with 10+ constraints. On 7B models, those long prompts degrade instruction-following, and the sequential 8-task chain adds latency without proportional quality gains.
+
+The local pipeline trades exhaustive verification for **fewer, simpler prompts + deterministic Python guard rails** — the same quality at 3–4× the speed.
+
+---
+
+## Why Separate Detection from Correction? (Cloud Pipeline)
 
 | Approach | Problem |
 |---|---|
@@ -284,17 +338,19 @@ Receives the two drafts and the violation report. Applies every HARD, SOFT, and 
 
 The Fact Checker has one narrow job (structured output, no creativity required) — this works reliably on 7B local models. The Reviewer then applies explicit violations rather than trying to discover them independently.
 
+In the local pipeline, detection and correction are combined into one Polish & Verify step — the simpler prompt is easier for 7B models to follow end-to-end.
+
 ---
 
 ## LLM Options
 
-| Provider | `.env` variable | Cost | Speed |
+| Provider | `.env` variable | Cost | Speed (cloud) |
 |---|---|---|---|
-| **Ollama** (default) | — (no key needed) | Free | ~3–5 min |
+| **Ollama** (default) | — (no key needed) | Free | ~2–4 min (local pipeline) |
 | **DeepSeek** | `DEEPSEEK_API_KEY` | ~$0.002/run | ~1–2 min |
 | **Claude (Anthropic)** | `ANTHROPIC_API_KEY` | Haiku ~$0.01, Sonnet ~$0.05 | ~1 min |
 | **ChatGPT (OpenAI)** | `OPENAI_API_KEY` | 4o-mini ~$0.01, 4o ~$0.05 | ~1 min |
-| **Gemini (Google)** | `GOOGLE_API_KEY` | Flash ~$0.01 (free tier quota is very low for 8-call pipelines) | ~1 min |
+| **Gemini (Google)** | `GOOGLE_API_KEY` | Flash ~$0.01 | ~1 min |
 | **Groq** | `GROQ_API_KEY` | Free tier available | ~30 sec |
 | **OpenRouter** | `OPENROUTER_API_KEY` | Many free models | Varies |
 
@@ -306,12 +362,12 @@ The Streamlit sidebar lets you switch provider, pick a model, enter your API key
 
 | Model | VRAM | Notes |
 |---|---|---|
-| `qwen3.5:9b` (default) | ~6 GB | Best instruction following; thinking mode auto-disabled by the app |
-| `qwen3:8b` | ~6 GB | Previous default — still excellent |
-| `qwen2.5:7b` | ~6 GB | Solid structured-output following |
+| `llama3.1:8b` | ~5 GB | Best instruction-following for the 5-call pipeline |
+| `qwen3.5:9b` (default) | ~6 GB | Thinking mode auto-disabled by the app |
+| `qwen3:8b` | ~6 GB | Solid structured-output following |
 | `mistral:7b` | ~5 GB | Good English writing quality |
 | `llama3.2:3b` | ~3 GB | Fastest, lower quality |
-| `qwen3:14b` / `qwen2.5:14b` | ~10 GB | Better reasoning, fewer hallucinations |
+| `qwen3:14b` / `qwen2.5:14b` | ~10 GB | Automatically uses cloud pipeline (better reasoning) |
 
 The app sets a 16k context window (`num_ctx`) for Ollama automatically — the Ollama default (~2–4k) would silently truncate the pipeline's long prompts. Because Ollama's OpenAI-compatible endpoint ignores per-request options, the app creates a lightweight derived model on first use (e.g. `qwen3.5:9b-ctx16384` — it shares the base weights, no extra disk). Override the size with `OLLAMA_NUM_CTX` in `.env` if you are RAM-constrained (`OLLAMA_NUM_CTX=0` disables the derived model).
 
@@ -331,7 +387,7 @@ Running a 7B model locally is more accessible than people expect — no GPU requ
 | GPU | Not required | CPU-only works fine |
 | OS | Windows 10/11, macOS 12+, Ubuntu 20.04+ | |
 
-Expect **1–3 tokens/sec** on CPU-only. A full 8-agent pipeline takes 5–10 minutes.
+Expect **1–3 tokens/sec** on CPU-only. The 5-call local pipeline takes 2–4 minutes. The full 7-task cloud pipeline takes 8–15 minutes on the same hardware (use a cloud API instead if you need speed).
 
 ### Recommended (GPU-accelerated)
 
@@ -341,7 +397,7 @@ Expect **1–3 tokens/sec** on CPU-only. A full 8-agent pipeline takes 5–10 mi
 | GPU | NVIDIA RTX 3060 (8 GB VRAM) or better |
 | Storage | 50 GB free (room for multiple models) |
 
-GPU gives **10–30 tokens/sec** — pipeline runs in under 2 minutes, same as a cloud API.
+GPU gives **10–30 tokens/sec** — local pipeline runs in under 1 minute.
 
 **Apple Silicon (M1/M2/M3/M4):** Ollama uses Metal acceleration natively. An M2 MacBook Pro with 16 GB unified memory runs 7B models at ~20–30 tokens/sec — excellent local performance with no GPU required.
 
@@ -352,7 +408,7 @@ GPU gives **10–30 tokens/sec** — pipeline runs in under 2 minutes, same as a
 ```
 cover_letter_crew/
 ├── app.py                  # Streamlit web UI
-├── cover_letter_crew.py    # All agents, tasks, and public generate_cover_letters() API
+├── cover_letter_crew.py    # All agents, tasks, both pipelines, and public API
 ├── file_parser.py          # PDF / DOCX / TXT text extraction
 ├── profile.py              # Default candidate profile (pre-loads in UI)
 ├── diagnose.py             # Step-by-step health check (unit tests + live LLM checks)
@@ -370,31 +426,47 @@ cover_letter_crew/
 
 ```python
 generate_cover_letters(profile_text, job_raw, llm_config, ...)
-# → dict with en_formal, en_modern, job, docx_path, profile_parsed
+# → dict with en_formal, job, docx_path, profile_parsed, match_score
+#   Automatically routes to local or cloud pipeline based on model size
 
-build_crew(job, llm, profile_text, step_callback, candidate_name, structured_profile, industry)
-# → CrewAI Crew with 7 agents and 8 tasks
+# ── Cloud pipeline ──────────────────────────────────────
+build_crew(job, llm, profile_text, step_callback, include_modern=False, ...)
+# → CrewAI Crew with agents and tasks (formal-only)
 
-clean_job_paste(raw, llm, interactive=True)
+_run_crew_pipeline(...)
+# → Full CrewAI execution: clean_job_paste → build_crew → kickoff → finalize
+
+# ── Local pipeline (7B models, no CrewAI) ───────────────
+_run_local_pipeline(job, profile_text, model, candidate_name, ...)
+# → 5 direct ollama API calls via requests (no CrewAI/LiteLLM at runtime)
+
+_ollama_chat(model, prompt, temperature, json_mode, base_url, timeout)
+# → Single Ollama chat call via requests — no CrewAI, no LiteLLM
+
+# ── Shared utilities ────────────────────────────────────
+clean_job_paste(raw, llm)
 # → dict: company, job_title, location, job_desc, ref_number
 
 parse_profile(profile_text, llm)
 # → structured dict: name, companies, skills, tools, education, languages
 
-quick_match_check(profile_text, job_desc, llm)
-# → single-LLM-call pre-analysis: match_verdict, strengths, gaps, match_score
+quick_match_check(profile_text, job_desc, llm_config)
+# → single-call pre-analysis: match_score, strong points, gaps
 
-translate_letter(letter_text, target_lang, llm_config, original_job_title, company_name)
+translate_letter(letter_text, target_lang, llm_config)
 # → translated letter text with language-specific register rules
 
 get_llm(llm_config)
 # → LLM instance (Ollama, DeepSeek, Anthropic, OpenAI, Gemini, Groq, OpenRouter)
 
-save_to_docx(job, results, output_dir, candidate_name, ...)
-# → Path to saved .docx file (2 variants)
+save_to_docx(job, variants, output_dir, candidate_name, ...)
+# → Path to saved .docx file
 
-build_docx_bytes(results, job)
+build_docx_bytes(job, variants, candidate_name, ...)
 # → In-memory .docx bytes for streamlit.download_button
+
+_sanitize_letter(text) / _validate_letter(text, candidate_name) / _finalize_letter(...)
+# → Deterministic Python guard rails — used by both pipelines
 ```
 
 ---
@@ -408,7 +480,7 @@ streamlit run app.py
 1. Upload your CV (PDF, DOCX, or TXT) or paste profile text
 2. Paste the full job page from LinkedIn or any job board
 3. Click **Generate Cover Letters**
-4. Copy from the tabs, or download the Word document
+4. Copy from the code block, or download the Word document
 
 ### CLI (original mode)
 ```bash
@@ -420,36 +492,39 @@ Paste the job page when prompted. Word file is saved to `./output/`.
 ```python
 from cover_letter_crew import generate_cover_letters
 
+# The same interface works for both local and cloud models
 results = generate_cover_letters(
     profile_text="... your CV text ...",
     job_raw="... raw job posting ...",
     llm_config={
         "backend":     "ollama",
-        "model":       "qwen3.5:9b",
+        "model":       "llama3.1:8b",
         "temperature": 0.7,
         "max_tokens":  1500,
     },
     save_docx=True,
 )
 
-print(results["en_formal"])   # English formal letter body
-print(results["en_modern"])   # English modern letter body
+print(results["en_formal"])   # Formal letter body
+# results["en_modern"] exists for backward compat — same as en_formal
 ```
 
 ---
 
 ## Prompt Design for 7B Models
 
-Small models work best when prompts are:
-- **Structured** — output format uses explicit labels (`TECHNICAL_REQUIREMENTS:`, `PROHIBITED_CLAIMS:`, `EN_FORMAL_VIOLATIONS:`)
-- **Direct** — task descriptions use numbered imperatives, not open-ended questions
-- **Constrained** — writers are told: *"Output ONLY the cover letter body text."*
-- **Narrow** — the Fact Checker has one job (find violations), which actually works better on smaller models than asking a single agent to write + fact-check simultaneously
+The local pipeline uses prompts optimised for small models:
+- **Short** — 500–1200 chars (not 1500–2000 like the cloud variants)
+- **Single-focus** — each call has exactly one job (analyze, write, or polish)
+- **Structured** — output format uses explicit labels (`STRONG_MATCHES:`, `PROHIBITED_CLAIMS:`)
+- **Numbered** — instructions use numbered lists, not nested clauses
+- **Deterministic guard rails** — Python regex validation catches what small LLMs miss
 
 If output quality is inconsistent:
 1. Lower temperature to `0.5` in the sidebar
 2. Reduce max tokens to `1000–1200`
-3. Switch to `qwen3:14b` or the DeepSeek API
+3. Try `llama3.1:8b` instead of `qwen3.5:9b` — better instruction-following for this pipeline
+4. Switch to a cloud API for guaranteed quality
 
 ---
 
@@ -461,8 +536,8 @@ If anything misbehaves — especially with local AI — run the built-in step-by
 ```bat
 .\diagnose.bat               REM steps 1–12: unit tests + live Ollama/LLM checks (~2 min)
 .\diagnose.bat --offline     REM steps 1–3 only: no Ollama needed
-.\diagnose.bat --full        REM adds a real end-to-end 8-task pipeline run (slow!)
-.\diagnose.bat --model qwen3:8b
+.\diagnose.bat --full        REM adds a real end-to-end pipeline run (slow!)
+.\diagnose.bat --model llama3.1:8b
 .\diagnose.bat --url http://other-host:11434
 ```
 
@@ -470,8 +545,8 @@ If anything misbehaves — especially with local AI — run the built-in step-by
 ```bash
 python diagnose.py              # steps 1–12: unit tests + live Ollama/LLM checks (~2 min)
 python diagnose.py --offline    # steps 1–3 only: no Ollama needed
-python diagnose.py --full       # adds a real end-to-end 8-task pipeline run (slow!)
-python diagnose.py --model qwen3:8b
+python diagnose.py --full       # adds a real end-to-end pipeline run (slow!)
+python diagnose.py --model llama3.1:8b
 python diagnose.py --url http://other-host:11434
 ```
 
@@ -485,9 +560,10 @@ Each numbered step prints `[PASS]` / `[FAIL]` with a hint, covering: environment
 |---|---|
 | `ModuleNotFoundError: crewai` | Activate the virtual environment first |
 | `Connection refused` (Ollama) | Run `ollama serve` in a separate terminal |
-| Model not found | Run `ollama pull qwen3.5:9b` |
+| Model not found | Run `ollama pull llama3.1:8b` (or your chosen model) |
 | Empty letter body | Check API key is valid; try a larger model |
-| Slow generation | Switch to DeepSeek API (~$0.002) for 3× speed |
+| Slow generation (local) | The 5-call pipeline takes 2–4 min on CPU; install requests `pip install requests` |
+| Slow generation (cloud) | Switch to Groq (fastest) or DeepSeek (~$0.002, good speed) |
 | Out of memory | Use `llama3.2:3b` or reduce max tokens in sidebar |
 | Fact Checker shows many violations | Good — the Reviewer will fix them. If final letter still has issues, try a larger model |
 
@@ -497,7 +573,8 @@ Each numbered step prints `[PASS]` / `[FAIL]` with a hint, covering: environment
 
 | Model | Cost per full run |
 |---|---|
-| Ollama local | $0.00 |
+| Ollama local (5-call pipeline) | $0.00 |
+| Ollama local (cloud/14B+ pipeline) | $0.00 |
 | DeepSeek V3 | ~$0.001–0.003 |
 | Claude Haiku 4.5 | ~$0.01–0.02 |
 | Claude Sonnet 4.6 | ~$0.05–0.10 |

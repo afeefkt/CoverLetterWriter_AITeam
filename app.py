@@ -51,7 +51,6 @@ _DEFAULTS = {
     "profile_parsed":    None,
     "profile_cache_text": "",
     "trans_formal":      None,
-    "trans_modern":      None,
     "trans_lang":        None,
     "profile_editor":     "",
     "match_result":      None,
@@ -282,9 +281,8 @@ def _run_crew(profile_text: str, job_raw: str, llm_config: dict,
         ("Skill Gap Mapper",       "Matching your profile to the job + setting truth boundaries"),
         ("ATS Optimizer",          "Building ATS keyword talking points"),
         ("EN Formal Writer",       "Drafting formal English letter"),
-        ("EN Modern Writer",       "Drafting modern English letter"),
         ("Fact Checker",           "Verifying claims against your profile — removing hallucinations"),
-        ("Tone & Grammar Reviewer","Applying fact-check fixes + polishing 2 letters"),
+        ("Tone & Grammar Reviewer","Applying fact-check fixes + polishing letter"),
     ]
     N          = len(STEPS)
     start      = time.time()
@@ -373,7 +371,6 @@ def _run_crew(profile_text: str, job_raw: str, llm_config: dict,
             st.session_state.job_meta         = results["job"]
             st.session_state.run_error        = None
             st.session_state.trans_formal     = None
-            st.session_state.trans_modern     = None
             st.session_state.trans_lang       = None
             if results.get("profile_parsed"):
                 st.session_state.profile_parsed    = results["profile_parsed"]
@@ -587,7 +584,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 
 st.title("Cover Letter Crew")
-st.caption("8 steps · JD Analysis → Resume Analysis → Skill Gap → ATS Keywords → EN Formal → EN Modern → Fact Checker → Reviewer")
+st.caption("7 steps · JD Analysis → Resume Analysis → Skill Gap → ATS Keywords → EN Formal → Fact Checker → Reviewer")
 
 # Load profile.py into session state on first run
 _load_default_profile()
@@ -942,15 +939,14 @@ if st.session_state.results:
                 st.session_state.profile_cache_text = ""
                 st.rerun()
 
-    # ── ENGLISH LETTERS ──────────────────────
-    tab1, tab2 = st.tabs(["EN Formal", "EN Modern"])
-    for tab, text in [(tab1, results["en_formal"]), (tab2, results["en_modern"])]:
-        with tab:
-            if text and text.strip():
-                st.code(text.strip(), language=None, wrap_lines=True)
-                st.caption("Click inside the block, press Ctrl+A then Ctrl+C to copy all.")
-            else:
-                st.warning("This variant was not generated successfully. Try re-running.")
+    # ── ENGLISH LETTER ──────────────────────
+    st.subheader("EN Formal")
+    text = results["en_formal"]
+    if text and text.strip():
+        st.code(text.strip(), language=None, wrap_lines=True)
+        st.caption("Click inside the block, press Ctrl+A then Ctrl+C to copy all.")
+    else:
+        st.warning("The letter was not generated successfully. Try re-running.")
 
     # ── TRANSLATION ──────────────────────────
     _default_lang_idx = max(0, _LANGUAGES.index(lang_pref) - 1) if lang_pref != "English" else 0
@@ -975,45 +971,32 @@ if st.session_state.results:
                 with st.spinner(f"Translating to {trans_lang_sel}…"):
                     st.session_state.trans_formal = translate_letter(
                         results["en_formal"], trans_lang_sel, llm_config)
-                    st.session_state.trans_modern = translate_letter(
-                        results["en_modern"], trans_lang_sel, llm_config)
                     st.session_state.trans_lang = trans_lang_sel
                 st.rerun()
 
         if st.session_state.trans_formal:
             _tl = st.session_state.trans_lang
             st.success(f"Translated to {_tl}")
-            tt1, tt2 = st.tabs([f"{_tl} - Formal", f"{_tl} - Modern"])
-            with tt1:
-                st.code(st.session_state.trans_formal, language=None, wrap_lines=True)
-                st.caption("Click inside the block, press Ctrl+A then Ctrl+C to copy all.")
-            with tt2:
-                st.code(st.session_state.trans_modern, language=None, wrap_lines=True)
-                st.caption("Click inside the block, press Ctrl+A then Ctrl+C to copy all.")
+            st.code(st.session_state.trans_formal, language=None, wrap_lines=True)
+            st.caption("Click inside the block, press Ctrl+A then Ctrl+C to copy all.")
 
     # ── DOWNLOAD ─────────────────────────────
     st.markdown("#### Download")
     st.caption("Select which variants to include in the Word document:")
 
-    _dl_cols = st.columns(4)
+    _dl_cols = st.columns(3)
     with _dl_cols[0]:
         dl_en_f = st.checkbox("EN Formal",  value=True,  key="dl_en_formal")
-    with _dl_cols[1]:
-        dl_en_m = st.checkbox("EN Modern",  value=True,  key="dl_en_modern")
     if st.session_state.trans_formal:
         _tl = st.session_state.trans_lang
-        with _dl_cols[2]:
+        with _dl_cols[1]:
             dl_tr_f = st.checkbox(f"{_tl} Formal", value=True,  key="dl_tr_formal")
-        with _dl_cols[3]:
-            dl_tr_m = st.checkbox(f"{_tl} Modern", value=False, key="dl_tr_modern")
     else:
-        dl_tr_f = dl_tr_m = False
+        dl_tr_f = False
 
     _sel_variants = []
     if dl_en_f: _sel_variants.append(("English - Formal", results["en_formal"]))
-    if dl_en_m: _sel_variants.append(("English - Modern", results["en_modern"]))
     if dl_tr_f: _sel_variants.append((f"{st.session_state.trans_lang} - Formal", st.session_state.trans_formal))
-    if dl_tr_m: _sel_variants.append((f"{st.session_state.trans_lang} - Modern", st.session_state.trans_modern))
 
     if _sel_variants:
         from cover_letter_crew import build_docx_bytes
